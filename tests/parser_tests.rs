@@ -235,3 +235,44 @@ WantedBy=multi-user.target
     assert_eq!(unit.get("Service", "Restart"), Some("always"));
     assert_eq!(unit.get("Unit", "Requires"), Some("docker.socket"));
 }
+
+#[test]
+fn test_drop_in_additive_new_key() {
+    let base = "\
+[Service]
+ExecStart=/usr/bin/daemon
+";
+    let drop_in = "\
+[Service]
+RestartSec=5
+Restart=always
+";
+    let mut unit = SystemdUnit::parse(base, PathBuf::from("test.service")).unwrap();
+    unit.merge_drop_in(drop_in, PathBuf::from("test.service.d/override.conf"));
+
+    // Keys not in base are added
+    assert_eq!(unit.get("Service", "RestartSec"), Some("5"));
+    assert_eq!(unit.get("Service", "Restart"), Some("always"));
+    // Original key unchanged
+    assert_eq!(unit.get("Service", "ExecStart"), Some("/usr/bin/daemon"));
+}
+
+#[test]
+fn test_drop_in_bare_reset_removes_key() {
+    let base = "\
+[Service]
+ExecStartPre=/usr/bin/original
+ExecStart=/usr/bin/daemon
+";
+    let drop_in = "\
+[Service]
+ExecStartPre=
+";
+    let mut unit = SystemdUnit::parse(base, PathBuf::from("test.service")).unwrap();
+    unit.merge_drop_in(drop_in, PathBuf::from("test.service.d/clear.conf"));
+
+    // Key fully cleared, not replaced
+    assert_eq!(unit.get_all("Service", "ExecStartPre"), Vec::<&str>::new());
+    // Other keys unaffected
+    assert_eq!(unit.get("Service", "ExecStart"), Some("/usr/bin/daemon"));
+}

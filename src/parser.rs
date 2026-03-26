@@ -13,57 +13,12 @@ pub struct SystemdUnit {
 impl SystemdUnit {
     pub fn parse(input: &str, source_path: PathBuf) -> Result<Self, ParseError> {
         let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        let mut current_section: Option<String> = None;
         let mut parse_warnings: Vec<String> = Vec::new();
 
         // Join continuation lines first
         let joined = Self::join_continuations(input);
 
-        for (line_num, line) in joined.lines().enumerate() {
-            let line = line.trim();
-
-            // Skip empty lines and comments
-            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                continue;
-            }
-
-            // Section header
-            if line.starts_with('[') && line.ends_with(']') {
-                let name = line[1..line.len() - 1].to_string();
-                current_section = Some(name.clone());
-                sections.entry(name).or_default();
-                continue;
-            }
-
-            // Key=Value pair
-            if let Some(ref section) = current_section {
-                if let Some(eq_pos) = line.find('=') {
-                    let key = line[..eq_pos].trim().to_string();
-                    let value = line[eq_pos + 1..].trim().to_string();
-
-                    let pairs = sections.get_mut(section).unwrap();
-
-                    // Empty value = reset all prior entries for this key
-                    if value.is_empty() {
-                        pairs.retain(|(k, _)| k != &key);
-                    } else {
-                        pairs.push((key, value));
-                    }
-                } else {
-                    parse_warnings.push(format!(
-                        "line {}: not a valid key=value pair: {}",
-                        line_num + 1,
-                        line
-                    ));
-                }
-            } else {
-                parse_warnings.push(format!(
-                    "line {}: directive outside of section: {}",
-                    line_num + 1,
-                    line
-                ));
-            }
-        }
+        Self::apply_lines(&mut sections, &joined, &mut parse_warnings, true);
 
         if sections.is_empty() {
             return Err(ParseError::NoSections {
@@ -77,6 +32,55 @@ impl SystemdUnit {
             drop_in_paths: Vec::new(),
             parse_warnings,
         })
+    }
+
+    fn apply_lines(
+        sections: &mut HashMap<String, Vec<(String, String)>>,
+        joined: &str,
+        parse_warnings: &mut Vec<String>,
+        warn_on_malformed: bool,
+    ) {
+        let mut current_section: Option<String> = None;
+
+        for (line_num, line) in joined.lines().enumerate() {
+            let line = line.trim();
+
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+
+            if line.starts_with('[') && line.ends_with(']') {
+                let name = line[1..line.len() - 1].to_string();
+                current_section = Some(name.clone());
+                sections.entry(name).or_default();
+                continue;
+            }
+
+            if let Some(ref section) = current_section {
+                if let Some(eq_pos) = line.find('=') {
+                    let key = line[..eq_pos].trim().to_string();
+                    let value = line[eq_pos + 1..].trim().to_string();
+                    let pairs = sections.get_mut(section).unwrap();
+                    if value.is_empty() {
+                        pairs.retain(|(k, _)| k != &key);
+                    } else {
+                        pairs.push((key, value));
+                    }
+                } else if warn_on_malformed {
+                    parse_warnings.push(format!(
+                        "line {}: not a valid key=value pair: {}",
+                        line_num + 1,
+                        line
+                    ));
+                }
+            } else if warn_on_malformed {
+                parse_warnings.push(format!(
+                    "line {}: directive outside of section: {}",
+                    line_num + 1,
+                    line
+                ));
+            }
+        }
     }
 
     fn join_continuations(input: &str) -> String {
@@ -109,41 +113,11 @@ impl SystemdUnit {
     }
 
     /// Merge a drop-in override into this unit.
-    /// Drop-in semantics: entries are added to existing sections.
+    /// Drop-in semantics: entries are added to sections, which are created on demand if absent.
     /// Empty-value assignments reset prior entries for that key.
     pub fn merge_drop_in(&mut self, input: &str, drop_in_path: PathBuf) {
         let joined = Self::join_continuations(input);
-        let mut current_section: Option<String> = None;
-
-        for line in joined.lines() {
-            let line = line.trim();
-
-            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                continue;
-            }
-
-            if line.starts_with('[') && line.ends_with(']') {
-                let name = line[1..line.len() - 1].to_string();
-                current_section = Some(name.clone());
-                self.sections.entry(name).or_default();
-                continue;
-            }
-
-            if let Some(ref section) = current_section {
-                if let Some(eq_pos) = line.find('=') {
-                    let key = line[..eq_pos].trim().to_string();
-                    let value = line[eq_pos + 1..].trim().to_string();
-                    let pairs = self.sections.get_mut(section).unwrap();
-
-                    if value.is_empty() {
-                        pairs.retain(|(k, _)| k != &key);
-                    } else {
-                        pairs.push((key, value));
-                    }
-                }
-            }
-        }
-
+        Self::apply_lines(&mut self.sections, &joined, &mut self.parse_warnings, false);
         self.drop_in_paths.push(drop_in_path);
     }
 
