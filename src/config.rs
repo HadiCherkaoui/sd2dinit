@@ -20,7 +20,7 @@ impl Default for Config {
         dependency_map.insert("sysinit.target".into(), "boot".into());
         dependency_map.insert("default.target".into(), "boot".into());
         Self {
-            output_dir: PathBuf::from("/etc/dinit.d/"),
+            output_dir: PathBuf::from("/etc/dinit.d"),
             ignored_units: Vec::new(),
             dependency_map,
         }

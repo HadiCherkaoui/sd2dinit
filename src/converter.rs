@@ -156,53 +156,35 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
 }
 
 fn replace_specifiers(input: &str, service_name: &str, warnings: &mut Vec<Warning>) -> String {
-    let mut result = input.to_string();
+    // First replace known specifiers
+    let input = input.replace("%n", &format!("{}.service", service_name));
+    let input = input.replace("%N", service_name);
 
-    // Replace known specifiers
-    if result.contains("%n") {
-        result = result.replace("%n", &format!("{}.service", service_name));
-    }
-    if result.contains("%N") {
-        result = result.replace("%N", service_name);
-    }
+    // Single pass: remove unknown specifiers with warning (deduplicated)
+    let mut result = String::with_capacity(input.len());
+    let mut warned: std::collections::HashSet<char> = std::collections::HashSet::new();
+    let mut chars = input.chars().peekable();
 
-    // Find and warn about unknown specifiers, then remove them
-    let unknown: Vec<String> = result
-        .match_indices('%')
-        .filter_map(|(i, _)| {
-            result.chars().nth(i + 1).and_then(|c| {
-                if c.is_alphabetic() && c != 'n' && c != 'N' {
-                    Some(format!("%{}", c))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-
-    for spec in &unknown {
-        warnings.push(Warning {
-            directive: "ExecStart".into(),
-            message: format!("unknown specifier {} removed", spec),
-            severity: Severity::Warn,
-        });
-    }
-
-    // Remove unknown specifiers
-    let mut cleaned = String::new();
-    let mut chars = result.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '%' {
             if let Some(&next) = chars.peek() {
-                if next.is_alphabetic() && next != 'n' && next != 'N' {
+                if next.is_alphabetic() {
+                    // Unknown specifier — consume and warn once
                     chars.next();
+                    if warned.insert(next) {
+                        warnings.push(Warning {
+                            directive: "ExecStart".into(),
+                            message: format!("unknown specifier %{} removed", next),
+                            severity: Severity::Warn,
+                        });
+                    }
                     continue;
                 }
             }
         }
-        cleaned.push(c);
+        result.push(c);
     }
-    cleaned
+    result
 }
 
 fn convert_restart(restart_value: Option<&str>, warnings: &mut Vec<Warning>) -> (RestartPolicy, bool) {
@@ -485,6 +467,7 @@ fn convert_stop_post(
 }
 
 fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {
+    // [Service] directives that are out of scope
     const SANDBOXING: &[&str] = &[
         "ProtectSystem", "ProtectHome", "PrivateTmp", "PrivateDevices",
         "PrivateNetwork", "ProtectKernelTunables", "ProtectKernelModules",
@@ -499,6 +482,8 @@ fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {
         "Slice", "CPUQuota", "MemoryMax", "MemoryHigh", "MemoryLow",
         "IOWeight", "IODeviceWeight", "TasksMax", "Delegate",
     ];
+
+    // [Unit] directives that are out of scope
     const CONDITIONALS: &[&str] = &[
         "ConditionPathExists", "ConditionPathIsDirectory",
         "ConditionFileNotEmpty", "ConditionDirectoryNotEmpty",
@@ -506,10 +491,12 @@ fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {
         "ConditionArchitecture", "ConditionSecurity",
         "AssertPathExists",
     ];
+
+    // [Socket] directives that are out of scope
     const SOCKET: &[&str] = &["ListenStream", "ListenDatagram", "ListenSequentialPacket", "Accept"];
 
+    // Scan [Service] for sandboxing and cgroup directives
     if let Some(pairs) = unit.sections.get("Service") {
-        // Deduplicate: only warn once per directive key
         let mut seen = std::collections::HashSet::new();
         for (key, _) in pairs {
             if !seen.insert(key.clone()) {
@@ -527,13 +514,35 @@ fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {
                     message: format!("{} (cgroup) not supported — skipped", key),
                     severity: Severity::Info,
                 });
-            } else if CONDITIONALS.contains(&key.as_str()) {
+            }
+        }
+    }
+
+    // Scan [Unit] for conditional directives
+    if let Some(pairs) = unit.sections.get("Unit") {
+        let mut seen = std::collections::HashSet::new();
+        for (key, _) in pairs {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if CONDITIONALS.contains(&key.as_str()) {
                 warnings.push(Warning {
                     directive: key.clone(),
                     message: format!("{} (conditional) not supported — skipped", key),
-                    severity: Severity::Info,
+                    severity: Severity::Warn,
                 });
-            } else if SOCKET.contains(&key.as_str()) {
+            }
+        }
+    }
+
+    // Scan [Socket] for socket activation directives
+    if let Some(pairs) = unit.sections.get("Socket") {
+        let mut seen = std::collections::HashSet::new();
+        for (key, _) in pairs {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if SOCKET.contains(&key.as_str()) {
                 warnings.push(Warning {
                     directive: key.clone(),
                     message: format!("{} (socket activation) not supported — skipped", key),

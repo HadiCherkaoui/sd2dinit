@@ -482,3 +482,55 @@ ExecStart=/usr/bin/daemon
     let result = convert(&unit, &default_config()).unwrap();
     assert!(!result.should_enable);
 }
+
+#[test]
+fn test_convert_exec_stop_alone() {
+    let unit = parse("\
+[Service]
+ExecStart=/usr/bin/daemon
+ExecStop=/usr/bin/graceful-stop
+");
+    let result = convert(&unit, &default_config()).unwrap();
+    assert_eq!(result.main_service.stop_command, Some("/usr/bin/graceful-stop".into()));
+    assert!(result.stop_script.is_none());
+}
+
+#[test]
+fn test_convert_should_enable_from_required_by() {
+    let unit = parse("\
+[Service]
+ExecStart=/usr/bin/daemon
+
+[Install]
+RequiredBy=multi-user.target
+");
+    let result = convert(&unit, &default_config()).unwrap();
+    assert!(result.should_enable);
+}
+
+#[test]
+fn test_convert_specifier_replacement() {
+    let unit = SystemdUnit::parse(
+        "[Service]\nExecStart=/usr/bin/foo --name=%N --unit=%n\n",
+        PathBuf::from("/usr/lib/systemd/system/myapp.service"),
+    ).unwrap();
+    let result = convert(&unit, &default_config()).unwrap();
+    let cmd = result.main_service.command.unwrap();
+    assert!(cmd.contains("--name=myapp"), "expected service name, got: {}", cmd);
+    assert!(cmd.contains("--unit=myapp.service"), "expected unit name, got: {}", cmd);
+    assert!(!cmd.contains('%'), "no specifiers should remain");
+}
+
+#[test]
+fn test_convert_condition_warning_in_unit_section() {
+    let unit = parse("\
+[Unit]
+ConditionPathExists=/etc/myapp.conf
+
+[Service]
+ExecStart=/usr/bin/daemon
+");
+    let result = convert(&unit, &default_config()).unwrap();
+    assert!(result.warnings.iter().any(|w| w.directive == "ConditionPathExists"),
+        "should warn about ConditionPathExists");
+}
