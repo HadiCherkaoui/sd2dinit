@@ -147,6 +147,8 @@ enum Severity { Info, Warn, Error }
 
 **`-` prefix handling**: In systemd, `ExecStartPre=-/usr/bin/cmd` means failure is tolerated. In the generated wrapper script, these lines get `|| true` appended. The -pre service always uses `depends-on` (hard dep) because the `|| true` ensures the script itself succeeds even if the `-` prefixed command fails.
 
+**Wrapper script format**: All generated `.sh` files must have `#!/bin/sh` shebang and `set -e` so that non-`-` prefixed commands properly fail the script on error.
+
 ### Dependency mapping
 
 | systemd | dinit | Notes |
@@ -288,7 +290,12 @@ ignored_units = ["systemd-tmpfiles-setup.service"]
 All fields optional. Defaults:
 - `output_dir`: `/etc/dinit.d/`
 - `ignored_units`: empty
-- `dependency_map`: empty (systemd service names pass through as-is after stripping `.service` suffix)
+- `dependency_map`: built-in defaults for common systemd targets (overridable via config):
+  - `"network-online.target" = "network"`
+  - `"multi-user.target" = "boot"`
+  - `"sysinit.target" = "boot"`
+  - `"default.target" = "boot"`
+  - Other names pass through as-is after stripping `.service` suffix
 
 ## Pacman Hook
 
