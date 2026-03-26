@@ -292,6 +292,7 @@ All fields optional. Defaults:
 - `ignored_units`: empty
 - `dependency_map`: built-in defaults for common systemd targets (overridable via config):
   - `"network-online.target" = "network"`
+  - `"network.target" = "network"`
   - `"multi-user.target" = "boot"`
   - `"sysinit.target" = "boot"`
   - `"default.target" = "boot"`
