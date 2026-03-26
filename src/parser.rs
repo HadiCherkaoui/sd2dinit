@@ -108,6 +108,45 @@ impl SystemdUnit {
         result
     }
 
+    /// Merge a drop-in override into this unit.
+    /// Drop-in semantics: entries are added to existing sections.
+    /// Empty-value assignments reset prior entries for that key.
+    pub fn merge_drop_in(&mut self, input: &str, drop_in_path: PathBuf) {
+        let joined = Self::join_continuations(input);
+        let mut current_section: Option<String> = None;
+
+        for line in joined.lines() {
+            let line = line.trim();
+
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+
+            if line.starts_with('[') && line.ends_with(']') {
+                let name = line[1..line.len() - 1].to_string();
+                current_section = Some(name.clone());
+                self.sections.entry(name).or_default();
+                continue;
+            }
+
+            if let Some(ref section) = current_section {
+                if let Some(eq_pos) = line.find('=') {
+                    let key = line[..eq_pos].trim().to_string();
+                    let value = line[eq_pos + 1..].trim().to_string();
+                    let pairs = self.sections.get_mut(section).unwrap();
+
+                    if value.is_empty() {
+                        pairs.retain(|(k, _)| k != &key);
+                    } else {
+                        pairs.push((key, value));
+                    }
+                }
+            }
+        }
+
+        self.drop_in_paths.push(drop_in_path);
+    }
+
     /// Get the last value for a key in a section (systemd semantics: last wins).
     pub fn get(&self, section: &str, key: &str) -> Option<&str> {
         self.sections.get(section).and_then(|pairs| {

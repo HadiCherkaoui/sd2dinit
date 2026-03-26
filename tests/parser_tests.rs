@@ -109,3 +109,29 @@ ExecStart=/bin/true
     assert!(!unit.parse_warnings.is_empty());
     assert!(unit.parse_warnings[0].contains("not a valid"));
 }
+
+#[test]
+fn test_parse_with_drop_in_merge() {
+    let base = "\
+[Service]
+Type=simple
+ExecStart=/usr/sbin/sshd -D
+ExecStartPre=/usr/bin/ssh-keygen
+";
+    let drop_in = "\
+[Service]
+ExecStartPre=
+ExecStartPre=/usr/bin/custom-keygen
+ExecStart=
+ExecStart=/usr/sbin/sshd -D -o UsePAM=yes
+";
+    let mut unit = SystemdUnit::parse(base, PathBuf::from("sshd.service")).unwrap();
+    unit.merge_drop_in(drop_in, PathBuf::from("sshd.service.d/override.conf"));
+
+    assert_eq!(unit.get("Service", "Type"), Some("simple"));
+    // ExecStartPre was reset then replaced
+    assert_eq!(unit.get_all("Service", "ExecStartPre"), vec!["/usr/bin/custom-keygen"]);
+    // ExecStart was reset then replaced
+    assert_eq!(unit.get("Service", "ExecStart"), Some("/usr/sbin/sshd -D -o UsePAM=yes"));
+    assert_eq!(unit.drop_in_paths.len(), 1);
+}
