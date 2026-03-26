@@ -1,6 +1,6 @@
 use sd2dinit::converter::convert;
 use sd2dinit::config::Config;
-use sd2dinit::model::{DinitType, RestartPolicy, Severity};
+use sd2dinit::model::{DinitType, RestartPolicy};
 use sd2dinit::parser::SystemdUnit;
 use std::path::PathBuf;
 
