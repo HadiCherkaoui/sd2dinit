@@ -7,5 +7,5 @@ Target = usr/lib/systemd/system/*.service
 [Action]
 Description = Converting systemd units to dinit...
 When = PostTransaction
-Exec = /usr/bin/sd2dinit hook
+Exec = /usr/local/bin/sd2dinit hook
 NeedsTargets

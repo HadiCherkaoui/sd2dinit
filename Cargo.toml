@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later"
 repository = "https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit"
 keywords = ["dinit", "systemd", "init", "artix", "converter"]
 categories = ["command-line-utilities"]
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.102"

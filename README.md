@@ -24,35 +24,47 @@ Built for [Artix Linux](https://artixlinux.org/) and any other dinit-based distr
 
 ### One-liner (recommended)
 
+Installs to `/usr/local/bin/sd2dinit` using `doas` (or `sudo` as fallback):
+
 ```sh
 curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install.sh | sh
 ```
 
-This installs the binary to `~/.local/bin/` (no escalation needed). If that directory is not in your `PATH`, the installer will tell you.
-
-To install globally to `/usr/local/bin/` instead:
-
-```sh
-curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install.sh | sh -s -- --global
-```
-
-To skip the pacman hook:
+Also installs the pacman hook automatically. To skip it:
 
 ```sh
 curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install.sh | sh -s -- --no-hook
 ```
 
+Pin a specific version:
+
+```sh
+curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install.sh | sh -s -- --version v0.1.0
+```
+
+### Via cargo
+
+```sh
+cargo install sd2dinit
+```
+
+Note: `cargo install` puts the binary in `~/.cargo/bin/`. If you want the pacman hook to work, copy it to a system path first:
+
+```sh
+doas install -Dm755 ~/.cargo/bin/sd2dinit /usr/local/bin/sd2dinit
+doas install -Dm644 hooks/sd2dinit.hook /usr/share/libalpm/hooks/sd2dinit.hook
+```
+
 ### Manual (from releases)
 
 1. Download the latest binary from the [Releases page](https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/releases)
-2. Make it executable and move it into your PATH:
+2. Install it:
    ```sh
-   chmod +x sd2dinit-linux-x86_64
-   mv sd2dinit-linux-x86_64 ~/.local/bin/sd2dinit
+   doas install -Dm755 sd2dinit-linux-x86_64 /usr/local/bin/sd2dinit
    ```
 3. Optionally install the pacman hook:
    ```sh
-   doas cp hooks/sd2dinit.hook /usr/share/libalpm/hooks/
+   doas install -Dm644 hooks/sd2dinit.hook /usr/share/libalpm/hooks/sd2dinit.hook
    ```
 
 ### Build from source

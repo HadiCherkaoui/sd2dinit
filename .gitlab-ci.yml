@@ -2,6 +2,7 @@ stages:
   - test
   - build
   - release
+  - publish
 
 variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
@@ -15,16 +16,15 @@ cache:
     - .cargo/git/
     - target/
 
-# ── Test ────────────────────────────────────────────────────────────────────
+# ── Test (every push) ────────────────────────────────────────────────────────
 
 test:
   stage: test
   image: rust:latest
   script:
     - cargo test --locked
-  coverage: '/test result: ok\. \d+ passed/'
 
-# ── Build (tags only) ────────────────────────────────────────────────────────
+# ── Build static binary (tags only) ─────────────────────────────────────────
 
 build-linux-x64:
   stage: build
@@ -44,7 +44,7 @@ build-linux-x64:
       - "$BINARY_NAME"
     expire_in: 90 days
 
-# ── Release (tags only) ──────────────────────────────────────────────────────
+# ── GitLab Release (tags only) ───────────────────────────────────────────────
 
 release:
   stage: release
@@ -61,7 +61,7 @@ release:
            --header "JOB-TOKEN: $CI_JOB_TOKEN" \
            --upload-file "$BINARY_NAME" \
            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}"
-    - echo "Binary uploaded to package registry"
+    - echo "Binary uploaded"
   release:
     tag_name: "$CI_COMMIT_TAG"
     name: "sd2dinit $CI_COMMIT_TAG"
@@ -69,39 +69,31 @@ release:
       ## sd2dinit $CI_COMMIT_TAG
 
       Converts systemd `.service` unit files into dinit service files.
-      Runs as a standalone CLI or as a pacman/alpm hook for automatic
-      conversion on package install and upgrade.
+      Runs standalone or as a pacman/alpm hook for automatic conversion.
 
-      ### Install (one-liner)
+      ### Install
 
       ```sh
       curl -fsSL $CI_PROJECT_URL/-/raw/main/install.sh | sh
       ```
 
-      Or with a specific version:
+      Installs to `/usr/local/bin/sd2dinit` using `doas` or `sudo`.
+      Pass `--no-hook` to skip the pacman hook, or `--version $CI_COMMIT_TAG` to pin this version.
+
+      ### Or via cargo
 
       ```sh
-      curl -fsSL $CI_PROJECT_URL/-/raw/main/install.sh | sh -s -- --version $CI_COMMIT_TAG
+      cargo install sd2dinit
+      # then install the hook manually:
+      doas install -Dm644 /path/to/hooks/sd2dinit.hook /usr/share/libalpm/hooks/
       ```
 
-      ### What's installed
-
-      - `sd2dinit` binary → `~/.local/bin/` (or `/usr/local/bin/` with privilege escalation)
-      - `sd2dinit.hook` → `/usr/share/libalpm/hooks/` (requires doas/sudo — Artix/Arch only)
-
-      ### Quick start after install
+      ### Quick start
 
       ```sh
-      # Dry-run conversion
       sd2dinit convert /usr/lib/systemd/system/sshd.service --dry-run
-
-      # Convert + enable + start
-      sudo sd2dinit install /usr/lib/systemd/system/nginx.service --enable --start
+      doas sd2dinit install /usr/lib/systemd/system/nginx.service --enable --start
       ```
-
-      ### Changes
-
-      See [CHANGELOG](CHANGELOG.md) or the commit history for details.
     assets:
       links:
         - name: "$BINARY_NAME"
@@ -110,3 +102,17 @@ release:
         - name: "install.sh"
           url: "$CI_PROJECT_URL/-/raw/$CI_COMMIT_TAG/install.sh"
           link_type: other
+
+# ── Publish to crates.io (tags only) ─────────────────────────────────────────
+# Requires CARGO_REGISTRY_TOKEN set in GitLab CI/CD → Settings → Variables
+
+publish-crate:
+  stage: publish
+  image: rust:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - job: test
+    - job: release
+  script:
+    - cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"

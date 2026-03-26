@@ -1,26 +1,24 @@
 #!/bin/sh
 # sd2dinit installer
-# Installs the sd2dinit binary and optionally the pacman/alpm hook.
 #
 # Usage:
 #   curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install.sh | sh
-#   sh install.sh [--version v0.1.0] [--no-hook] [--global]
+#   sh install.sh [--version v0.1.0] [--no-hook]
 
 set -e
 
 GITLAB_URL="https://gitlab.cherkaoui.ch"
-PROJECT_PATH="HadiCherkaoui/sd2dinit"
 PROJECT_PATH_ENCODED="HadiCherkaoui%2Fsd2dinit"
 BINARY_NAME="sd2dinit-linux-x86_64"
-HOOK_SRC="hooks/sd2dinit.hook"
+INSTALL_BIN="/usr/local/bin/sd2dinit"
 HOOK_DEST="/usr/share/libalpm/hooks/sd2dinit.hook"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 
 if [ -t 1 ]; then
-    GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; RESET='\033[0m'
+    GREEN='\033[0;32m' YELLOW='\033[1;33m' RED='\033[0;31m' CYAN='\033[0;36m' RESET='\033[0m'
 else
-    GREEN=''; YELLOW=''; RED=''; CYAN=''; RESET=''
+    GREEN='' YELLOW='' RED='' CYAN='' RESET=''
 fi
 
 info()    { printf "${CYAN}info:${RESET}    %s\n" "$*"; }
@@ -32,75 +30,42 @@ err()     { printf "${RED}error:${RESET}   %s\n" "$*" >&2; exit 1; }
 
 VERSION=""
 INSTALL_HOOK=true
-FORCE_GLOBAL=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version)  VERSION="$2";   shift 2 ;;
-        --no-hook)  INSTALL_HOOK=false; shift ;;
-        --global)   FORCE_GLOBAL=true;  shift ;;
-        *)          err "unknown argument: $1" ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --no-hook) INSTALL_HOOK=false; shift ;;
+        *) err "unknown argument: $1" ;;
     esac
 done
 
-# ── Checks ───────────────────────────────────────────────────────────────────
+# ── Requirements ─────────────────────────────────────────────────────────────
 
-if ! command -v curl >/dev/null 2>&1; then
-    err "curl is required but not installed"
-fi
+command -v curl >/dev/null 2>&1 || err "curl is required but not installed"
 
-ARCH=$(uname -m)
-if [ "$ARCH" != "x86_64" ]; then
-    err "only x86_64 is supported (got $ARCH)"
-fi
+[ "$(uname -m)" = "x86_64" ] || err "only x86_64 is supported (got $(uname -m))"
 
-# ── Resolve version ──────────────────────────────────────────────────────────
-
-if [ -z "$VERSION" ]; then
-    info "Fetching latest release..."
-    API="${GITLAB_URL}/api/v4/projects/${PROJECT_PATH_ENCODED}/releases/permalink/latest"
-    VERSION=$(curl -fsSL "$API" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
-    if [ -z "$VERSION" ]; then
-        err "Could not determine latest version. Try: install.sh --version v0.1.0"
-    fi
-fi
-
-info "Installing sd2dinit $VERSION"
-
-# ── Privilege escalation ─────────────────────────────────────────────────────
-
+# Privilege escalation: doas preferred, sudo as fallback
 if command -v doas >/dev/null 2>&1; then
     ESCALATE="doas"
 elif command -v sudo >/dev/null 2>&1; then
     ESCALATE="sudo"
 else
-    ESCALATE=""
+    err "neither doas nor sudo found — cannot install system-wide"
 fi
 
-# ── Choose install location ───────────────────────────────────────────────────
+info "Using $ESCALATE for privilege escalation"
 
-LOCAL_BIN="$HOME/.local/bin"
+# ── Resolve version ───────────────────────────────────────────────────────────
 
-if [ "$FORCE_GLOBAL" = "false" ] && [ -d "$LOCAL_BIN" ] && \
-   echo "$PATH" | tr ':' '\n' | grep -qxF "$LOCAL_BIN"; then
-    INSTALL_DIR="$LOCAL_BIN"
-    NEEDS_ESCALATION=false
-    info "Installing to $INSTALL_DIR (no escalation needed)"
-elif [ "$FORCE_GLOBAL" = "false" ]; then
-    # ~/.local/bin exists or can be created but not in PATH
-    mkdir -p "$LOCAL_BIN"
-    INSTALL_DIR="$LOCAL_BIN"
-    NEEDS_ESCALATION=false
-    warn "$LOCAL_BIN is not in PATH — add this to your shell profile:"
-    warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-else
-    INSTALL_DIR="/usr/local/bin"
-    NEEDS_ESCALATION=true
-    if [ -z "$ESCALATE" ]; then
-        err "--global requested but neither doas nor sudo is available"
-    fi
-    info "Installing to $INSTALL_DIR (requires $ESCALATE)"
+if [ -z "$VERSION" ]; then
+    info "Fetching latest release..."
+    API="${GITLAB_URL}/api/v4/projects/${PROJECT_PATH_ENCODED}/releases/permalink/latest"
+    VERSION=$(curl -fsSL "$API" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
+    [ -n "$VERSION" ] || err "Could not determine latest version. Try: install.sh --version v0.1.0"
 fi
+
+info "Installing sd2dinit $VERSION"
 
 # ── Download binary ───────────────────────────────────────────────────────────
 
@@ -108,58 +73,51 @@ DOWNLOAD_URL="${GITLAB_URL}/api/v4/projects/${PROJECT_PATH_ENCODED}/packages/gen
 TMP_BIN=$(mktemp)
 
 info "Downloading $BINARY_NAME..."
-if ! curl -fsSL --progress-bar "$DOWNLOAD_URL" -o "$TMP_BIN"; then
-    rm -f "$TMP_BIN"
-    err "Download failed. Check that version $VERSION exists and the registry is accessible."
-fi
+curl -fsSL --progress-bar "$DOWNLOAD_URL" -o "$TMP_BIN" \
+    || { rm -f "$TMP_BIN"; err "Download failed. Check that version $VERSION exists."; }
 
 chmod +x "$TMP_BIN"
 
-# ── Install binary ────────────────────────────────────────────────────────────
+# ── Install binary to /usr/local/bin ─────────────────────────────────────────
 
-if [ "$NEEDS_ESCALATION" = "true" ]; then
-    $ESCALATE install -Dm755 "$TMP_BIN" "$INSTALL_DIR/sd2dinit"
-else
-    install -Dm755 "$TMP_BIN" "$INSTALL_DIR/sd2dinit"
-fi
-
+info "Installing to $INSTALL_BIN (requires $ESCALATE)..."
+$ESCALATE install -Dm755 "$TMP_BIN" "$INSTALL_BIN"
 rm -f "$TMP_BIN"
-success "sd2dinit installed to $INSTALL_DIR/sd2dinit"
+success "sd2dinit installed to $INSTALL_BIN"
 
-# ── Install pacman hook (optional) ────────────────────────────────────────────
+# ── Install pacman hook ───────────────────────────────────────────────────────
 
 if [ "$INSTALL_HOOK" = "true" ]; then
     HOOK_DIR=$(dirname "$HOOK_DEST")
-
     if [ ! -d "$HOOK_DIR" ]; then
-        warn "Hook directory $HOOK_DIR not found — skipping hook install (not Artix/Arch?)"
-    elif [ -z "$ESCALATE" ]; then
-        warn "Hook install requires privilege escalation but neither doas nor sudo found"
-        warn "Manually install: cp $HOOK_SRC $HOOK_DEST"
+        warn "Hook directory $HOOK_DIR not found — skipping (not Artix/Arch?)"
     else
-        info "Installing pacman hook (requires $ESCALATE)..."
-        HOOK_URL="${GITLAB_URL}/${PROJECT_PATH}/-/raw/${VERSION}/hooks/sd2dinit.hook"
+        info "Installing pacman hook to $HOOK_DEST (requires $ESCALATE)..."
+        HOOK_URL="${GITLAB_URL}/api/v4/projects/${PROJECT_PATH_ENCODED}/packages/generic/sd2dinit/${VERSION}/sd2dinit.hook"
+        # Fall back to raw repo URL if hook not in package registry
+        HOOK_URL_RAW="${GITLAB_URL}/HadiCherkaoui/sd2dinit/-/raw/${VERSION}/hooks/sd2dinit.hook"
         TMP_HOOK=$(mktemp)
-        if curl -fsSL "$HOOK_URL" -o "$TMP_HOOK"; then
+        if curl -fsSL "$HOOK_URL" -o "$TMP_HOOK" 2>/dev/null \
+            || curl -fsSL "$HOOK_URL_RAW" -o "$TMP_HOOK" 2>/dev/null; then
             $ESCALATE install -Dm644 "$TMP_HOOK" "$HOOK_DEST"
             rm -f "$TMP_HOOK"
             success "Hook installed to $HOOK_DEST"
             info "sd2dinit will now auto-convert .service files on pacman install/upgrade"
         else
             rm -f "$TMP_HOOK"
-            warn "Could not download hook file — install manually:"
-            warn "  $ESCALATE cp hooks/sd2dinit.hook $HOOK_DEST"
+            warn "Could not download hook file. Install manually:"
+            warn "  $ESCALATE install -Dm644 hooks/sd2dinit.hook $HOOK_DEST"
         fi
     fi
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
-echo ""
+printf "\n"
 success "Installation complete!"
-echo ""
-echo "Quick start:"
-echo "  sd2dinit convert /usr/lib/systemd/system/sshd.service --dry-run"
-echo "  sd2dinit install /usr/lib/systemd/system/nginx.service --enable --start"
-echo ""
-echo "See sd2dinit --help for full usage."
+printf "\n"
+printf "Quick start:\n"
+printf "  sd2dinit convert /usr/lib/systemd/system/sshd.service --dry-run\n"
+printf "  %s sd2dinit install /usr/lib/systemd/system/nginx.service --enable --start\n" "$ESCALATE"
+printf "\n"
+printf "See sd2dinit --help for full usage.\n"
