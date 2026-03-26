@@ -2,6 +2,12 @@
 name = "sd2dinit"
 version = "0.1.0"
 edition = "2024"
+description = "Convert systemd .service unit files to dinit service files"
+authors = ["Hadi Cherkaoui"]
+license = "GPL-3.0-or-later"
+repository = "https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit"
+keywords = ["dinit", "systemd", "init", "artix", "converter"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.102"

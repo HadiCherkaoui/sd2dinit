@@ -1,0 +1,112 @@
+stages:
+  - test
+  - build
+  - release
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  PACKAGE_NAME: "sd2dinit"
+  BINARY_NAME: "sd2dinit-linux-x86_64"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cargo/registry/
+    - .cargo/git/
+    - target/
+
+# ── Test ────────────────────────────────────────────────────────────────────
+
+test:
+  stage: test
+  image: rust:latest
+  script:
+    - cargo test --locked
+  coverage: '/test result: ok\. \d+ passed/'
+
+# ── Build (tags only) ────────────────────────────────────────────────────────
+
+build-linux-x64:
+  stage: build
+  image: rust:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - rustup target add x86_64-unknown-linux-musl
+    - apt-get update -qq && apt-get install -y -qq musl-tools
+  script:
+    - cargo build --release --locked --target x86_64-unknown-linux-musl
+    - strip target/x86_64-unknown-linux-musl/release/sd2dinit
+    - cp target/x86_64-unknown-linux-musl/release/sd2dinit "$BINARY_NAME"
+  artifacts:
+    name: "$BINARY_NAME-$CI_COMMIT_TAG"
+    paths:
+      - "$BINARY_NAME"
+    expire_in: 90 days
+
+# ── Release (tags only) ──────────────────────────────────────────────────────
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - job: build-linux-x64
+      artifacts: true
+  script:
+    # Upload binary to GitLab Generic Packages Registry
+    - |
+      curl --fail --silent \
+           --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+           --upload-file "$BINARY_NAME" \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}"
+    - echo "Binary uploaded to package registry"
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "sd2dinit $CI_COMMIT_TAG"
+    description: |
+      ## sd2dinit $CI_COMMIT_TAG
+
+      Converts systemd `.service` unit files into dinit service files.
+      Runs as a standalone CLI or as a pacman/alpm hook for automatic
+      conversion on package install and upgrade.
+
+      ### Install (one-liner)
+
+      ```sh
+      curl -fsSL $CI_PROJECT_URL/-/raw/main/install.sh | sh
+      ```
+
+      Or with a specific version:
+
+      ```sh
+      curl -fsSL $CI_PROJECT_URL/-/raw/main/install.sh | sh -s -- --version $CI_COMMIT_TAG
+      ```
+
+      ### What's installed
+
+      - `sd2dinit` binary → `~/.local/bin/` (or `/usr/local/bin/` with privilege escalation)
+      - `sd2dinit.hook` → `/usr/share/libalpm/hooks/` (requires doas/sudo — Artix/Arch only)
+
+      ### Quick start after install
+
+      ```sh
+      # Dry-run conversion
+      sd2dinit convert /usr/lib/systemd/system/sshd.service --dry-run
+
+      # Convert + enable + start
+      sudo sd2dinit install /usr/lib/systemd/system/nginx.service --enable --start
+      ```
+
+      ### Changes
+
+      See [CHANGELOG](CHANGELOG.md) or the commit history for details.
+    assets:
+      links:
+        - name: "$BINARY_NAME"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${CI_COMMIT_TAG}/${BINARY_NAME}"
+          link_type: package
+        - name: "install.sh"
+          url: "$CI_PROJECT_URL/-/raw/$CI_COMMIT_TAG/install.sh"
+          link_type: other
