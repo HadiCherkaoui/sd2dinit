@@ -98,13 +98,22 @@ fn run_convert(
         config.output_dir = dir.to_path_buf();
     }
 
-    // Reject non-.service files
-    if let Some(ext) = unit_file.extension().and_then(|e| e.to_str()) {
-        if ext != "service" {
+    // Reject non-.service files (including extension-less files)
+    match unit_file.extension().and_then(|e| e.to_str()) {
+        Some("service") => {}
+        Some(ext) => {
             eprintln!(
                 "{} only .service units are supported, got .{} — skipping {}",
                 "warning:".yellow().bold(),
                 ext,
+                unit_file.display()
+            );
+            return Ok(1);
+        }
+        None => {
+            eprintln!(
+                "{} only .service units are supported — skipping {}",
+                "warning:".yellow().bold(),
                 unit_file.display()
             );
             return Ok(1);
