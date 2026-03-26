@@ -118,4 +118,7 @@ publish-crate:
     - job: test
     - job: release
   script:
-    - cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"
+    # CARGO_REGISTRY_TOKEN is read from the environment automatically.
+    # --allow-dirty is needed because CARGO_HOME=$CI_PROJECT_DIR/.cargo puts
+    # the registry cache inside the git tree; those files are not source changes.
+    - cargo publish --locked --allow-dirty
