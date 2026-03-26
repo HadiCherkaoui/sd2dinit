@@ -10,6 +10,13 @@ keywords = ["dinit", "systemd", "init", "artix", "converter"]
 categories = ["command-line-utilities"]
 readme = "README.md"
 
+[profile.release]
+opt-level = "z"      # optimise for binary size (CLI tool — speed not critical)
+lto = true           # link-time optimisation — smaller binary, faster startup
+codegen-units = 1    # single codegen unit enables more inlining across crates
+panic = "abort"      # drop panic unwinding machinery
+strip = true         # strip symbols (Rust 1.59+, replaces explicit strip in CI)
+
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.6.0", features = ["derive"] }

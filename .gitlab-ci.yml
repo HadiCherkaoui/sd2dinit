@@ -36,7 +36,7 @@ build-linux-x64:
     - apt-get update -qq && apt-get install -y -qq musl-tools
   script:
     - cargo build --release --locked --target x86_64-unknown-linux-musl
-    - strip target/x86_64-unknown-linux-musl/release/sd2dinit
+    # strip = true in Cargo.toml [profile.release] handles symbol stripping
     - cp target/x86_64-unknown-linux-musl/release/sd2dinit "$BINARY_NAME"
   artifacts:
     name: "$BINARY_NAME-$CI_COMMIT_TAG"
@@ -54,6 +54,9 @@ release:
   needs:
     - job: build-linux-x64
       artifacts: true
+  before_script:
+    # release-cli image is Alpine-based — curl is not pre-installed
+    - apk add --no-cache curl
   script:
     # Upload binary to GitLab Generic Packages Registry
     - |
