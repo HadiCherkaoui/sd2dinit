@@ -88,9 +88,9 @@ impl SystemdUnit {
         let mut continuation = String::new();
 
         for line in input.lines() {
-            if line.ends_with('\\') {
+            if let Some(stripped) = line.strip_suffix('\\') {
                 // Strip the trailing backslash and append
-                continuation.push_str(line[..line.len() - 1].trim_end());
+                continuation.push_str(stripped.trim_end());
                 continuation.push(' ');
             } else if !continuation.is_empty() {
                 // End of continuation: append this line trimmed

@@ -121,15 +121,15 @@ fn run_convert(
     }
 
     // Reject template/instance units
-    if let Some(stem) = unit_file.file_stem().and_then(|s| s.to_str()) {
-        if stem.contains('@') {
-            eprintln!(
-                "{} template/instance units not supported — skipping {}",
-                "warning:".yellow().bold(),
-                unit_file.display()
-            );
-            return Ok(1);
-        }
+    if let Some(stem) = unit_file.file_stem().and_then(|s| s.to_str())
+        && stem.contains('@')
+    {
+        eprintln!(
+            "{} template/instance units not supported — skipping {}",
+            "warning:".yellow().bold(),
+            unit_file.display()
+        );
+        return Ok(1);
     }
 
     let content = fs::read_to_string(unit_file)

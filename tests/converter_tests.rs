@@ -313,38 +313,83 @@ Environment=\"BAZ=qux\"
     let result = convert(&unit, &default_config()).unwrap();
     assert!(result.env_file_content.is_some());
     let content = result.env_file_content.unwrap();
-    assert!(content.contains("FOO=bar"));
-    assert!(content.contains("BAZ=qux"));
+    // Values are single-quoted in the generated dinit env-file
+    assert!(content.contains("FOO='bar'"), "content was: {content}");
+    assert!(content.contains("BAZ='qux'"), "content was: {content}");
     assert!(result.main_service.env_files.iter().any(|p|
         p.to_str().unwrap().ends_with("test.env")
     ));
 }
 
 #[test]
-fn test_convert_environment_file_passthrough() {
+fn test_convert_environment_file_missing_required_warns() {
+    // Required EnvironmentFile that does not exist on disk → warning, no env-file
     let unit = parse("\
 [Service]
 ExecStart=/usr/bin/daemon
-EnvironmentFile=/etc/default/myapp
-EnvironmentFile=-/etc/sysconfig/myapp
+EnvironmentFile=/nonexistent/path/myapp.env
 ");
     let result = convert(&unit, &default_config()).unwrap();
-    assert!(result.main_service.env_files.contains(&PathBuf::from("/etc/default/myapp")));
-    assert!(result.main_service.env_files.contains(&PathBuf::from("/etc/sysconfig/myapp")));
+    assert!(result.main_service.env_files.is_empty());
+    assert!(result.warnings.iter().any(|w| w.directive == "EnvironmentFile"));
+}
+
+#[test]
+fn test_convert_environment_file_missing_optional_skipped() {
+    // Optional EnvironmentFile (-prefix) that does not exist → info warning, no env-file
+    let unit = parse("\
+[Service]
+ExecStart=/usr/bin/daemon
+EnvironmentFile=-/nonexistent/path/myapp.env
+");
+    let result = convert(&unit, &default_config()).unwrap();
+    assert!(result.main_service.env_files.is_empty());
+    assert!(result.warnings.iter().any(|w|
+        w.directive == "EnvironmentFile" && w.message.contains("not found")
+    ));
+}
+
+#[test]
+fn test_convert_environment_file_parsed() {
+    // EnvironmentFile that exists on disk is parsed and inlined into the
+    // generated env-file in dinit-compatible format.
+    let tmp = std::env::temp_dir().join("sd2dinit_test_env.env");
+    std::fs::write(&tmp, "# comment\nMY_VAR=hello\nQUOTED=\"world\"\n").unwrap();
+
+    let unit = SystemdUnit::parse(
+        &format!("[Service]\nExecStart=/usr/bin/daemon\nEnvironmentFile={}\n", tmp.display()),
+        PathBuf::from("/usr/lib/systemd/system/test.service"),
+    ).unwrap();
+
+    let result = convert(&unit, &default_config()).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(result.env_file_content.is_some());
+    let content = result.env_file_content.unwrap();
+    assert!(content.contains("MY_VAR='hello'"), "content was: {content}");
+    assert!(content.contains("QUOTED='world'"), "content was: {content}");
+    assert!(result.main_service.env_files.iter().any(|p|
+        p.to_str().unwrap().ends_with("test.env")
+    ));
 }
 
 #[test]
 fn test_convert_both_environment_and_file() {
+    // Inline Environment= vars are combined with parsed EnvironmentFile content
+    // into a single generated env-file. Non-existent files are skipped.
     let unit = parse("\
 [Service]
 ExecStart=/usr/bin/daemon
 Environment=KEY=val
-EnvironmentFile=/etc/default/myapp
+EnvironmentFile=-/nonexistent/path/myapp.env
 ");
     let result = convert(&unit, &default_config()).unwrap();
-    assert_eq!(result.main_service.env_files.len(), 2);
+    // Only one env-file (the generated one from inline vars; the EnvironmentFile
+    // was skipped because it does not exist)
+    assert_eq!(result.main_service.env_files.len(), 1);
     assert!(result.main_service.env_files[0].to_str().unwrap().ends_with("test.env"));
-    assert_eq!(result.main_service.env_files[1], PathBuf::from("/etc/default/myapp"));
+    let content = result.env_file_content.unwrap();
+    assert!(content.contains("KEY='val'"), "content was: {content}");
 }
 
 // --- Task 7: Pre/Post tests ---

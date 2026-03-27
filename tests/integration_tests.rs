@@ -139,15 +139,14 @@ WorkingDirectory=/
 
     assert!(output.contains("type = scripted\n"));
     assert!(output.contains("working-dir = /\n"));
-    // Generated env file + passthrough
+    // Generated env file with single-quoted values; /etc/locale.conf does not
+    // exist in the test environment so is skipped with an info warning.
     assert!(result.env_file_content.is_some());
     let env = result.env_file_content.unwrap();
-    assert!(env.contains("TMPDIR=/tmp"));
-    assert!(env.contains("LANG=C"));
-    // env_files: generated .env first, then passthrough
-    assert_eq!(result.main_service.env_files.len(), 2);
+    assert!(env.contains("TMPDIR='/tmp'"), "env was: {env}");
+    assert!(env.contains("LANG='C'"), "env was: {env}");
+    assert_eq!(result.main_service.env_files.len(), 1);
     assert!(result.main_service.env_files[0].to_str().unwrap().ends_with("tmpfiles.env"));
-    assert_eq!(result.main_service.env_files[1], PathBuf::from("/etc/locale.conf"));
 }
 
 #[test]
@@ -242,10 +241,10 @@ WantedBy=multi-user.target
     assert!(output.contains("restart-delay = 10\n"));
     assert!(output.contains("waits-for = network\n"));
     assert!(output.contains("depends-ms = network\n"));
-    // Environment= generates .env
+    // Environment= generates .env with single-quoted value;
+    // /etc/myapp/environment does not exist so EnvironmentFile= is skipped.
     assert!(result.env_file_content.is_some());
-    assert!(result.env_file_content.unwrap().contains("MYAPP_ENV=production"));
-    // EnvironmentFile= passthrough
-    assert!(result.main_service.env_files.len() == 2);
+    assert!(result.env_file_content.unwrap().contains("MYAPP_ENV='production'"));
+    assert!(result.main_service.env_files.len() == 1);
     assert!(result.should_enable);
 }

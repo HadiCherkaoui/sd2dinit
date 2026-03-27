@@ -55,20 +55,20 @@ pub fn run_hook(config: &Config) -> anyhow::Result<()> {
         }
 
         // Skip template units
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if stem.contains('@') {
-                eprintln!("  skip: template unit {}", path.display());
-                skipped += 1;
-                continue;
-            }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            && stem.contains('@')
+        {
+            eprintln!("  skip: template unit {}", path.display());
+            skipped += 1;
+            continue;
         }
 
         // Check ignored list
-        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-            if config.ignored_units.contains(&name.to_string()) {
-                skipped += 1;
-                continue;
-            }
+        if let Some(name) = path.file_name().and_then(|s| s.to_str())
+            && config.ignored_units.contains(&name.to_string())
+        {
+            skipped += 1;
+            continue;
         }
 
         // Paths from the pacman hook are relative to filesystem root (e.g. "usr/lib/...")

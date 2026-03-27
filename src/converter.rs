@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::ConvertError;
@@ -102,8 +102,8 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     let (depends_on, depends_ms, waits_for) = convert_dependencies(unit, config, &mut warnings);
 
     // ExecStartPre / ExecStartPost
-    let (pre_service, pre_script) = convert_exec_pre(unit, &name, &unit.source_path.clone(), config, &mut warnings);
-    let (post_service, post_script) = convert_exec_post(unit, &name, &unit.source_path.clone(), config, &mut warnings);
+    let (pre_service, pre_script) = convert_exec_pre(unit, &name, &unit.source_path, config, &mut warnings);
+    let (post_service, post_script) = convert_exec_post(unit, &name, &unit.source_path, config, &mut warnings);
 
     // ExecStopPost
     let (final_stop_command, stop_script) = convert_stop_post(unit, stop_command, &name, config, &mut warnings);
@@ -208,21 +208,17 @@ fn replace_specifiers(input: &str, service_name: &str, warnings: &mut Vec<Warnin
     let mut chars = input.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if c == '%' {
-            if let Some(&next) = chars.peek() {
-                if next.is_alphabetic() {
-                    // Unknown specifier — consume and warn once
-                    chars.next();
-                    if warned.insert(next) {
-                        warnings.push(Warning {
-                            directive: "ExecStart".into(),
-                            message: format!("unknown specifier %{} removed", next),
-                            severity: Severity::Warn,
-                        });
-                    }
-                    continue;
-                }
+        if c == '%' && let Some(&next) = chars.peek() && next.is_alphabetic() {
+            // Unknown specifier — consume and warn once
+            chars.next();
+            if warned.insert(next) {
+                warnings.push(Warning {
+                    directive: "ExecStart".into(),
+                    message: format!("unknown specifier %{next} removed"),
+                    severity: Severity::Warn,
+                });
             }
+            continue;
         }
         result.push(c);
     }
@@ -341,12 +337,12 @@ fn parse_shell_env_file(content: &str) -> Vec<(String, String)> {
 /// Strips shell quoting from a raw env-file value string.
 fn parse_shell_value(s: &str) -> String {
     let s = s.trim();
-    if s.starts_with('\'') {
+    if let Some(inner) = s.strip_prefix('\'') {
         // Single-quoted: everything literal up to the closing `'`.
-        let end = s[1..].find('\'').map(|i| i + 1).unwrap_or(s.len());
-        s[1..end].to_string()
-    } else if s.starts_with('"') {
-        parse_double_quoted_value(&s[1..])
+        let end = inner.find('\'').unwrap_or(inner.len());
+        inner[..end].to_string()
+    } else if let Some(inner) = s.strip_prefix('"') {
+        parse_double_quoted_value(inner)
     } else {
         s.to_string()
     }
@@ -371,7 +367,7 @@ fn parse_double_quoted_value(s: &str) -> String {
                 None => result.push('\\'),
             },
             '$' => {
-                let is_var = chars.peek().map_or(false, |&c| {
+                let is_var = chars.peek().is_some_and(|&c| {
                     c.is_alphabetic() || c == '_' || c == '{'
                 });
                 if is_var {
@@ -379,7 +375,7 @@ fn parse_double_quoted_value(s: &str) -> String {
                         chars.next();
                         for c in chars.by_ref() { if c == '}' { break; } }
                     } else {
-                        while chars.peek().map_or(false, |c| c.is_alphanumeric() || *c == '_') {
+                        while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_') {
                             chars.next();
                         }
                     }
@@ -491,7 +487,7 @@ fn build_script_command(config: &Config, service_name: &str, suffix: &str) -> St
 fn convert_exec_pre(
     unit: &SystemdUnit,
     service_name: &str,
-    source_path: &PathBuf,
+    source_path: &Path,
     config: &Config,
     _warnings: &mut Vec<Warning>,
 ) -> (Option<DinitService>, Option<String>) {
@@ -524,7 +520,7 @@ fn convert_exec_pre(
 
     let pre_service = DinitService {
         name: format!("{}-pre", service_name),
-        source_path: source_path.clone(),
+        source_path: source_path.to_path_buf(),
         service_type: DinitType::Scripted,
         command: Some(command),
         stop_command: None,
@@ -548,7 +544,7 @@ fn convert_exec_pre(
 fn convert_exec_post(
     unit: &SystemdUnit,
     service_name: &str,
-    source_path: &PathBuf,
+    source_path: &Path,
     config: &Config,
     _warnings: &mut Vec<Warning>,
 ) -> (Option<DinitService>, Option<String>) {
@@ -581,7 +577,7 @@ fn convert_exec_post(
 
     let post_service = DinitService {
         name: format!("{}-post", service_name),
-        source_path: source_path.clone(),
+        source_path: source_path.to_path_buf(),
         service_type: DinitType::Scripted,
         command: Some(command),
         stop_command: None,
