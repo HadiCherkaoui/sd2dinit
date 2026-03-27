@@ -63,8 +63,14 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
         }
     };
 
-    // Command — replace known specifiers
-    let command = replace_specifiers(exec_start, &name, &mut warnings);
+    // Command — replace known specifiers, then shell-wrap if env vars are referenced.
+    // Dinit does not expand $VAR in command = lines; the string is passed verbatim
+    // to execvp. Wrapping in sh -c "exec CMD" lets the shell do the expansion using
+    // variables loaded from env-file.
+    let command = {
+        let cmd = replace_specifiers(exec_start, &name, &mut warnings);
+        wrap_if_env_refs(cmd, &mut warnings)
+    };
 
     // Stop command
     let stop_command = unit.get("Service", "ExecStop").map(|s| s.to_string());
@@ -153,6 +159,24 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
         warnings,
         should_enable,
     })
+}
+
+/// Wraps a command in `sh -c "exec CMD"` when it contains `$VAR` references.
+///
+/// Dinit does not shell-expand the `command =` value before calling `execvp`.
+/// Using `exec` replaces the shell so dinit tracks the correct PID.
+fn wrap_if_env_refs(cmd: String, warnings: &mut Vec<Warning>) -> String {
+    if !cmd.contains('$') {
+        return cmd;
+    }
+    warnings.push(Warning {
+        directive: "ExecStart".into(),
+        message: "command references $VAR — wrapped in sh -c for env expansion (dinit does not expand variables in command lines)".into(),
+        severity: Severity::Info,
+    });
+    // Escape any double quotes inside cmd so the sh -c argument stays valid.
+    let escaped = cmd.replace('"', "\\\"");
+    format!("/bin/sh -c \"exec {}\"", escaped)
 }
 
 fn replace_specifiers(input: &str, service_name: &str, warnings: &mut Vec<Warning>) -> String {
@@ -476,7 +500,11 @@ fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {
         "LockPersonality", "MemoryDenyWriteExecute", "RestrictRealtime",
         "RestrictSUIDSGID", "RestrictNamespaces", "SystemCallFilter",
         "SystemCallArchitectures", "CapabilityBoundingSet", "AmbientCapabilities",
-        "SecureBits",
+        "SecureBits", "ProtectClock", "ProtectKernelLogs", "IPAddressDeny",
+        "RestrictAddressFamilies", "PrivateUsers",
+        // DynamicUser creates an ephemeral unprivileged UID at runtime; dinit
+        // has no equivalent so the service runs as root instead.
+        "DynamicUser", "SupplementaryGroups",
     ];
     const CGROUP: &[&str] = &[
         "Slice", "CPUQuota", "MemoryMax", "MemoryHigh", "MemoryLow",
