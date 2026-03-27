@@ -63,13 +63,14 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
         }
     };
 
-    // Command — replace known specifiers, then shell-wrap if env vars are referenced.
-    // Dinit does not expand $VAR in command = lines; the string is passed verbatim
-    // to execvp. Wrapping in sh -c "exec CMD" lets the shell do the expansion using
-    // variables loaded from env-file.
+    // Command — replace known specifiers, then convert $VAR references.
+    // Dinit supports $VAR substitution natively, but $VAR substitutes as a
+    // single token even if it contains spaces. $/VAR splits on whitespace and
+    // collapses to zero arguments when empty — correct for argument-list
+    // variables like $EARLYOOM_ARGS or $DAEMON_OPTS.
     let command = {
         let cmd = replace_specifiers(exec_start, &name, &mut warnings);
-        wrap_if_env_refs(cmd, &mut warnings)
+        convert_env_refs(cmd)
     };
 
     // Stop command
@@ -161,22 +162,39 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     })
 }
 
-/// Wraps a command in `sh -c "exec CMD"` when it contains `$VAR` references.
+/// Converts systemd `$VAR` references in a command string to dinit syntax.
 ///
-/// Dinit does not shell-expand the `command =` value before calling `execvp`.
-/// Using `exec` replaces the shell so dinit tracks the correct PID.
-fn wrap_if_env_refs(cmd: String, warnings: &mut Vec<Warning>) -> String {
+/// Standalone tokens that are exactly `$VAR` or `${VAR}` (the entire argument
+/// is the variable) become `$/VAR` — dinit's word-splitting form. `$/VAR`
+/// expands the value and splits it on whitespace into zero-or-more arguments,
+/// collapsing entirely when the variable is empty or unset. This matches
+/// systemd's behaviour for argument-list variables like `$EARLYOOM_ARGS`.
+///
+/// Embedded references (e.g. `--path=$VAR/sub`) are kept as `$VAR` since
+/// the surrounding context constrains them to a single token.
+fn convert_env_refs(cmd: String) -> String {
     if !cmd.contains('$') {
         return cmd;
     }
-    warnings.push(Warning {
-        directive: "ExecStart".into(),
-        message: "command references $VAR — wrapped in sh -c for env expansion (dinit does not expand variables in command lines)".into(),
-        severity: Severity::Info,
-    });
-    // Escape any double quotes inside cmd so the sh -c argument stays valid.
-    let escaped = cmd.replace('"', "\\\"");
-    format!("/bin/sh -c \"exec {}\"", escaped)
+    cmd.split_whitespace()
+        .map(|token| {
+            if let Some(rest) = token.strip_prefix('$') {
+                // Braced form: ${VAR}
+                let inner = if rest.starts_with('{') && rest.ends_with('}') {
+                    &rest[1..rest.len() - 1]
+                } else {
+                    rest
+                };
+                // Only convert if the token is EXACTLY a variable name
+                // (alphanumeric + underscores — no surrounding text).
+                if !inner.is_empty() && inner.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    return format!("$/{}", inner);
+                }
+            }
+            token.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn replace_specifiers(input: &str, service_name: &str, warnings: &mut Vec<Warning>) -> String {
