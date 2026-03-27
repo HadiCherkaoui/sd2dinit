@@ -65,7 +65,17 @@ if [ -z "$VERSION" ]; then
     [ -n "$VERSION" ] || err "Could not determine latest version. Try: install.sh --version v0.1.0"
 fi
 
-info "Installing sd2dinit $VERSION"
+# Show currently installed version if any
+if command -v sd2dinit >/dev/null 2>&1; then
+    CURRENT=$(sd2dinit --version 2>/dev/null | awk '{print $2}' || true)
+    if [ -n "$CURRENT" ]; then
+        info "Upgrading sd2dinit $CURRENT → $VERSION"
+    else
+        info "Installing sd2dinit $VERSION"
+    fi
+else
+    info "Installing sd2dinit $VERSION"
+fi
 
 # ── Download binary ───────────────────────────────────────────────────────────
 
