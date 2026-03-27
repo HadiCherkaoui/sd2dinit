@@ -314,8 +314,8 @@ Environment=\"BAZ=qux\"
     assert!(result.env_file_content.is_some());
     let content = result.env_file_content.unwrap();
     // Values are single-quoted in the generated dinit env-file
-    assert!(content.contains("FOO='bar'"), "content was: {content}");
-    assert!(content.contains("BAZ='qux'"), "content was: {content}");
+    assert!(content.contains("FOO=bar"), "content was: {content}");
+    assert!(content.contains("BAZ=qux"), "content was: {content}");
     assert!(result.main_service.env_files.iter().any(|p|
         p.to_str().unwrap().ends_with("test.env")
     ));
@@ -366,8 +366,8 @@ fn test_convert_environment_file_parsed() {
 
     assert!(result.env_file_content.is_some());
     let content = result.env_file_content.unwrap();
-    assert!(content.contains("MY_VAR='hello'"), "content was: {content}");
-    assert!(content.contains("QUOTED='world'"), "content was: {content}");
+    assert!(content.contains("MY_VAR=hello"), "content was: {content}");
+    assert!(content.contains("QUOTED=world"), "content was: {content}");
     assert!(result.main_service.env_files.iter().any(|p|
         p.to_str().unwrap().ends_with("test.env")
     ));
@@ -389,7 +389,7 @@ EnvironmentFile=-/nonexistent/path/myapp.env
     assert_eq!(result.main_service.env_files.len(), 1);
     assert!(result.main_service.env_files[0].to_str().unwrap().ends_with("test.env"));
     let content = result.env_file_content.unwrap();
-    assert!(content.contains("KEY='val'"), "content was: {content}");
+    assert!(content.contains("KEY=val"), "content was: {content}");
 }
 
 // --- Task 7: Pre/Post tests ---

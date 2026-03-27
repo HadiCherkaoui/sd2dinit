@@ -390,26 +390,14 @@ fn parse_double_quoted_value(s: &str) -> String {
     result
 }
 
-/// Quotes a value string for use in a dinit-format env-file.
+/// Formats a value for use in a dinit env-file.
 ///
-/// - No `'` in value → single-quote it (no `$` expansion possible).
-/// - Has `'` but no `$` → double-quote it.
-/// - Has both → double-quote with `$` escaped as `\$`.
+/// Dinit's env-file parser is purely literal — no quoting syntax, no escape
+/// sequences, no variable substitution. Everything from `=` to end of line
+/// becomes the value verbatim. Writing the shell-stripped value as-is is
+/// both correct and sufficient.
 fn dinit_quote_value(value: &str) -> String {
-    let has_sq = value.contains('\'');
-    let has_dollar = value.contains('$');
-    if !has_sq {
-        format!("'{value}'")
-    } else if !has_dollar {
-        let esc = value.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{esc}\"")
-    } else {
-        let esc = value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('$', "\\$");
-        format!("\"{esc}\"")
-    }
+    value.to_string()
 }
 
 fn convert_dependencies(

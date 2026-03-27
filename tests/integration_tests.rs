@@ -143,8 +143,8 @@ WorkingDirectory=/
     // exist in the test environment so is skipped with an info warning.
     assert!(result.env_file_content.is_some());
     let env = result.env_file_content.unwrap();
-    assert!(env.contains("TMPDIR='/tmp'"), "env was: {env}");
-    assert!(env.contains("LANG='C'"), "env was: {env}");
+    assert!(env.contains("TMPDIR=/tmp"), "env was: {env}");
+    assert!(env.contains("LANG=C"), "env was: {env}");
     assert_eq!(result.main_service.env_files.len(), 1);
     assert!(result.main_service.env_files[0].to_str().unwrap().ends_with("tmpfiles.env"));
 }
@@ -244,7 +244,7 @@ WantedBy=multi-user.target
     // Environment= generates .env with single-quoted value;
     // /etc/myapp/environment does not exist so EnvironmentFile= is skipped.
     assert!(result.env_file_content.is_some());
-    assert!(result.env_file_content.unwrap().contains("MYAPP_ENV='production'"));
+    assert!(result.env_file_content.unwrap().contains("MYAPP_ENV=production"));
     assert!(result.main_service.env_files.len() == 1);
     assert!(result.should_enable);
 }
