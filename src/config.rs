@@ -15,9 +15,9 @@ pub struct Config {
     /// Output directory for converted user-scope services.
     ///
     /// Written when the source path is under `usr/lib/systemd/user/`.
-    /// `/usr/share/dinit.d/` is the conventional location for
-    /// distribution-provided user services that should be available to all
-    /// users' dinit sessions.
+    /// `/usr/lib/dinit.d/user/` is the standard location for
+    /// distribution-provided user services; all users' dinit instances
+    /// pick it up automatically alongside `~/.config/dinit.d/`.
     pub user_output_dir: PathBuf,
 
     pub ignored_units: Vec<String>,
@@ -34,7 +34,7 @@ impl Default for Config {
         dependency_map.insert("default.target".into(), "boot".into());
         Self {
             output_dir: PathBuf::from("/etc/dinit.d"),
-            user_output_dir: PathBuf::from("/usr/share/dinit.d"),
+            user_output_dir: PathBuf::from("/usr/lib/dinit.d/user"),
             ignored_units: Vec::new(),
             dependency_map,
         }
