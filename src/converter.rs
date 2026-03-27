@@ -96,7 +96,7 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     });
 
     // Environment
-    let (env_files, env_file_content) = convert_environment(unit, config, &name);
+    let (env_files, env_file_content) = convert_environment(unit, config, &name, &mut warnings);
 
     // Dependencies
     let (depends_on, depends_ms, waits_for) = convert_dependencies(unit, config, &mut warnings);
@@ -259,6 +259,7 @@ fn convert_environment(
     unit: &SystemdUnit,
     config: &Config,
     service_name: &str,
+    warnings: &mut Vec<Warning>,
 ) -> (Vec<PathBuf>, Option<String>) {
     let mut env_files = Vec::new();
     let mut env_content_lines: Vec<String> = Vec::new();
@@ -277,8 +278,25 @@ fn convert_environment(
     };
 
     for val in unit.get_all("Service", "EnvironmentFile") {
-        let path = val.strip_prefix('-').unwrap_or(val);
-        env_files.push(PathBuf::from(path));
+        // Systemd's '-' prefix means "optional — do not fail if missing".
+        // Dinit has no such marker; include the file only when it exists.
+        let (optional, path_str) = match val.strip_prefix('-') {
+            Some(p) => (true, p),
+            None    => (false, val),
+        };
+        let path = PathBuf::from(path_str);
+        if optional && !path.exists() {
+            warnings.push(Warning {
+                directive: "EnvironmentFile".into(),
+                message: format!(
+                    "optional env-file {} not found — skipped (dinit requires env-file to exist)",
+                    path_str
+                ),
+                severity: Severity::Info,
+            });
+        } else {
+            env_files.push(path);
+        }
     }
 
     (env_files, env_file_content)
