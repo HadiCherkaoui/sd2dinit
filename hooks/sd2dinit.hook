@@ -3,6 +3,7 @@ Type = Path
 Operation = Install
 Operation = Upgrade
 Target = usr/lib/systemd/system/*.service
+Target = usr/lib/systemd/user/*.service
 
 [Action]
 Description = Converting systemd units to dinit...

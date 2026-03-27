@@ -6,7 +6,20 @@ use crate::error::ConfigError;
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
+    /// Output directory for converted system-scope services.
+    ///
+    /// Written by the root dinit instance. Corresponds to
+    /// `usr/lib/systemd/system/` on the systemd side.
     pub output_dir: PathBuf,
+
+    /// Output directory for converted user-scope services.
+    ///
+    /// Written when the source path is under `usr/lib/systemd/user/`.
+    /// `/usr/share/dinit.d/` is the conventional location for
+    /// distribution-provided user services that should be available to all
+    /// users' dinit sessions.
+    pub user_output_dir: PathBuf,
+
     pub ignored_units: Vec<String>,
     pub dependency_map: HashMap<String, String>,
 }
@@ -21,6 +34,7 @@ impl Default for Config {
         dependency_map.insert("default.target".into(), "boot".into());
         Self {
             output_dir: PathBuf::from("/etc/dinit.d"),
+            user_output_dir: PathBuf::from("/usr/share/dinit.d"),
             ignored_units: Vec::new(),
             dependency_map,
         }
