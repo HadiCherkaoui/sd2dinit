@@ -58,11 +58,6 @@ pub struct ConversionResult {
     pub post_script: Option<String>,
     pub stop_script: Option<String>,
     pub env_file_content: Option<String>,
-    /// Shell wrapper script content, generated when `EnvironmentFile=` entries
-    /// use shell quoting that dinit's env-file parser cannot handle. The script
-    /// sources the env-files via sh and execs the real command, letting the
-    /// shell do all quoting and variable expansion.
-    pub env_wrapper_script: Option<String>,
     pub warnings: Vec<Warning>,
     pub should_enable: bool,
 }

@@ -26,7 +26,7 @@ fn remove_unit(name: &str, output_dir: &Path) {
         .output();
 
     // All file suffixes that sd2dinit may have generated for this service.
-    const SUFFIXES: &[&str] = &["", "-pre", "-post", "-pre.sh", "-post.sh", "-stop.sh", ".env", "-env.sh"];
+    const SUFFIXES: &[&str] = &["", "-pre", "-post", "-pre.sh", "-post.sh", "-stop.sh", ".env"];
 
     for suffix in SUFFIXES {
         let path = output_dir.join(format!("{}{}", name, suffix));
@@ -171,10 +171,6 @@ fn convert_unit(path: &Path, output_dir: &Path, config: &Config) -> anyhow::Resu
             .map_err(|e| anyhow::anyhow!("failed to write {}: {}", env_path.display(), e))?;
     }
 
-    // Write env wrapper script (used when EnvironmentFile uses shell quoting)
-    if let Some(ref script) = result.env_wrapper_script {
-        write_script_file(output_dir, &format!("{}-env.sh", result.main_service.name), script)?;
-    }
 
     Ok(result.main_service.name.clone())
 }
