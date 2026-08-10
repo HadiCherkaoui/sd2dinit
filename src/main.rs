@@ -15,12 +15,32 @@ use sd2dinit::converter;
 use sd2dinit::generator;
 use sd2dinit::model::Severity;
 use sd2dinit::parser::SystemdUnit;
+/// Attribution shown by `--help`, and by `--version` alongside the version.
+///
+/// The binary carries the credit and the source offer itself, so both survive
+/// being repackaged, vendored, or shipped without the README. ASCII only --
+/// this has to render on a Windows console at a legacy code page too.
+const CREDIT: &str = concat!(
+    "Copyright (C) Hadi Cherkaoui\n",
+    "Licence: AGPL-3.0-or-later\n",
+    "Source:  ",
+    env!("CARGO_PKG_REPOSITORY"),
+);
+
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n\nCopyright (C) Hadi Cherkaoui\nLicence: AGPL-3.0-or-later\nSource:  ",
+    env!("CARGO_PKG_REPOSITORY"),
+);
+
 
 #[derive(Parser)]
 #[command(
     name = "sd2dinit",
     about = "Convert systemd unit files to dinit service files",
-    version
+    version,
+    long_version = LONG_VERSION,
+    after_help = CREDIT
 )]
 struct Cli {
     #[command(subcommand)]
