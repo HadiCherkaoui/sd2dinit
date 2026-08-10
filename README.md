@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Hadi Cherkaoui <contact@hide.cherkaoui.ch>
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
 # sd2dinit
 
 **sd2dinit** converts systemd `.service` unit files into [dinit](https://davmac.org/projects/dinit/) service files. It runs as a standalone CLI or as a pacman/alpm hook that automatically converts units whenever packages are installed or upgraded.

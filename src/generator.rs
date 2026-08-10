@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Hadi Cherkaoui <contact@hide.cherkaoui.ch>
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use crate::model::{DinitService, DinitType, RestartPolicy};
 
 pub fn generate(service: &DinitService) -> String {

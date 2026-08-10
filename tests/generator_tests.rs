@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Hadi Cherkaoui <contact@hide.cherkaoui.ch>
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use sd2dinit::model::{DinitService, DinitType, RestartPolicy};
 use sd2dinit::generator::generate;
 use std::path::PathBuf;

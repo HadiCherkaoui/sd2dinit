@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Hadi Cherkaoui <contact@hide.cherkaoui.ch>
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use sd2dinit::config::Config;
 use sd2dinit::converter;
 use sd2dinit::generator;
