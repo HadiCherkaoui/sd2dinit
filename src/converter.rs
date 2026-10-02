@@ -21,9 +21,9 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
         .to_string();
 
     // ExecStart is required
-    let exec_start = unit.get("Service", "ExecStart").ok_or_else(|| {
-        ConvertError::NoExecStart { unit: name.clone() }
-    })?;
+    let exec_start = unit
+        .get("Service", "ExecStart")
+        .ok_or_else(|| ConvertError::NoExecStart { unit: name.clone() })?;
 
     // Type mapping
     let raw_type = unit.get("Service", "Type").unwrap_or("simple");
@@ -106,15 +106,18 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     let (depends_on, depends_ms, waits_for) = convert_dependencies(unit, config, &mut warnings);
 
     // ExecStartPre / ExecStartPost
-    let (pre_service, pre_script) = convert_exec_pre(unit, &name, &unit.source_path, config, &mut warnings);
-    let (post_service, post_script) = convert_exec_post(unit, &name, &unit.source_path, config, &mut warnings);
+    let (pre_service, pre_script) =
+        convert_exec_pre(unit, &name, &unit.source_path, config, &mut warnings);
+    let (post_service, post_script) =
+        convert_exec_post(unit, &name, &unit.source_path, config, &mut warnings);
 
     // ExecStopPost
-    let (final_stop_command, stop_script) = convert_stop_post(unit, stop_command, &name, config, &mut warnings);
+    let (final_stop_command, stop_script) =
+        convert_stop_post(unit, stop_command, &name, config, &mut warnings);
 
     // WantedBy / RequiredBy in [Install]
-    let should_enable = unit.get("Install", "WantedBy").is_some()
-        || unit.get("Install", "RequiredBy").is_some();
+    let should_enable =
+        unit.get("Install", "WantedBy").is_some() || unit.get("Install", "RequiredBy").is_some();
 
     // Warn about out-of-scope directives
     warn_out_of_scope(unit, &mut warnings);
@@ -212,7 +215,10 @@ fn replace_specifiers(input: &str, service_name: &str, warnings: &mut Vec<Warnin
     let mut chars = input.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if c == '%' && let Some(&next) = chars.peek() && next.is_alphabetic() {
+        if c == '%'
+            && let Some(&next) = chars.peek()
+            && next.is_alphabetic()
+        {
             // Unknown specifier — consume and warn once
             chars.next();
             if warned.insert(next) {
@@ -229,14 +235,19 @@ fn replace_specifiers(input: &str, service_name: &str, warnings: &mut Vec<Warnin
     result
 }
 
-fn convert_restart(restart_value: Option<&str>, warnings: &mut Vec<Warning>) -> (RestartPolicy, bool) {
+fn convert_restart(
+    restart_value: Option<&str>,
+    warnings: &mut Vec<Warning>,
+) -> (RestartPolicy, bool) {
     match restart_value {
         None | Some("no") => (RestartPolicy::Never, false),
         Some("always") => (RestartPolicy::Always, true),
         Some("on-success") => {
             warnings.push(Warning {
                 directive: "Restart".into(),
-                message: "on-success maps to always-restart; dinit has no clean-exit-only restart mode".into(),
+                message:
+                    "on-success maps to always-restart; dinit has no clean-exit-only restart mode"
+                        .into(),
                 severity: Severity::Warn,
             });
             (RestartPolicy::Always, true)
@@ -247,7 +258,10 @@ fn convert_restart(restart_value: Option<&str>, warnings: &mut Vec<Warning>) -> 
         Some(other) => {
             warnings.push(Warning {
                 directive: "Restart".into(),
-                message: format!("unknown restart value '{}' — defaulting to no restart", other),
+                message: format!(
+                    "unknown restart value '{}' — defaulting to no restart",
+                    other
+                ),
                 severity: Severity::Warn,
             });
             (RestartPolicy::Never, false)
@@ -278,7 +292,7 @@ fn convert_environment(
     for val in unit.get_all("Service", "EnvironmentFile") {
         let (optional, path_str) = match val.strip_prefix('-') {
             Some(p) => (true, p),
-            None    => (false, val),
+            None => (false, val),
         };
         let path = std::path::Path::new(path_str);
         if !path.exists() {
@@ -289,7 +303,11 @@ fn convert_environment(
                 } else {
                     format!("env-file {path_str} not found")
                 },
-                severity: if optional { Severity::Info } else { Severity::Warn },
+                severity: if optional {
+                    Severity::Info
+                } else {
+                    Severity::Warn
+                },
             });
             continue;
         }
@@ -367,19 +385,29 @@ fn parse_double_quoted_value(s: &str) -> String {
                 // Only these have special meaning inside double quotes (POSIX)
                 Some(c @ ('"' | '\\' | '$' | '`')) => result.push(c),
                 Some('\n') => {} // line continuation
-                Some(c) => { result.push('\\'); result.push(c); }
+                Some(c) => {
+                    result.push('\\');
+                    result.push(c);
+                }
                 None => result.push('\\'),
             },
             '$' => {
-                let is_var = chars.peek().is_some_and(|&c| {
-                    c.is_alphabetic() || c == '_' || c == '{'
-                });
+                let is_var = chars
+                    .peek()
+                    .is_some_and(|&c| c.is_alphabetic() || c == '_' || c == '{');
                 if is_var {
                     if chars.peek() == Some(&'{') {
                         chars.next();
-                        for c in chars.by_ref() { if c == '}' { break; } }
+                        for c in chars.by_ref() {
+                            if c == '}' {
+                                break;
+                            }
+                        }
                     } else {
-                        while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_') {
+                        while chars
+                            .peek()
+                            .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+                        {
                             chars.next();
                         }
                     }
@@ -493,7 +521,10 @@ fn convert_exec_pre(
         let (is_dash, clean_cmd) = parse_dash_prefix(cmd);
         if is_dash {
             let script_content = format!("#!/bin/sh\nset -e\n{} || true\n", clean_cmd);
-            (build_script_command(config, service_name, "pre"), Some(script_content))
+            (
+                build_script_command(config, service_name, "pre"),
+                Some(script_content),
+            )
         } else {
             (clean_cmd.to_string(), None)
         }
@@ -507,7 +538,10 @@ fn convert_exec_pre(
                 script.push_str(&format!("{}\n", clean_cmd));
             }
         }
-        (build_script_command(config, service_name, "pre"), Some(script))
+        (
+            build_script_command(config, service_name, "pre"),
+            Some(script),
+        )
     };
 
     let pre_service = DinitService {
@@ -550,7 +584,10 @@ fn convert_exec_post(
         let (is_dash, clean_cmd) = parse_dash_prefix(cmd);
         if is_dash {
             let script_content = format!("#!/bin/sh\nset -e\n{} || true\n", clean_cmd);
-            (build_script_command(config, service_name, "post"), Some(script_content))
+            (
+                build_script_command(config, service_name, "post"),
+                Some(script_content),
+            )
         } else {
             (clean_cmd.to_string(), None)
         }
@@ -564,7 +601,10 @@ fn convert_exec_post(
                 script.push_str(&format!("{}\n", clean_cmd));
             }
         }
-        (build_script_command(config, service_name, "post"), Some(script))
+        (
+            build_script_command(config, service_name, "post"),
+            Some(script),
+        )
     };
 
     let post_service = DinitService {
@@ -620,7 +660,9 @@ fn convert_stop_post(
         None => {
             warnings.push(Warning {
                 directive: "ExecStopPost".into(),
-                message: "ExecStopPost= without ExecStop= skipped — dinit handles stop signals natively".into(),
+                message:
+                    "ExecStopPost= without ExecStop= skipped — dinit handles stop signals natively"
+                        .into(),
                 severity: Severity::Warn,
             });
             (None, None)
@@ -631,35 +673,71 @@ fn convert_stop_post(
 fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {
     // [Service] directives that are out of scope
     const SANDBOXING: &[&str] = &[
-        "ProtectSystem", "ProtectHome", "PrivateTmp", "PrivateDevices",
-        "PrivateNetwork", "ProtectKernelTunables", "ProtectKernelModules",
-        "ProtectControlGroups", "NoNewPrivileges", "ReadOnlyPaths",
-        "ReadWritePaths", "InaccessiblePaths", "ProtectHostname",
-        "LockPersonality", "MemoryDenyWriteExecute", "RestrictRealtime",
-        "RestrictSUIDSGID", "RestrictNamespaces", "SystemCallFilter",
-        "SystemCallArchitectures", "CapabilityBoundingSet", "AmbientCapabilities",
-        "SecureBits", "ProtectClock", "ProtectKernelLogs", "IPAddressDeny",
-        "RestrictAddressFamilies", "PrivateUsers",
+        "ProtectSystem",
+        "ProtectHome",
+        "PrivateTmp",
+        "PrivateDevices",
+        "PrivateNetwork",
+        "ProtectKernelTunables",
+        "ProtectKernelModules",
+        "ProtectControlGroups",
+        "NoNewPrivileges",
+        "ReadOnlyPaths",
+        "ReadWritePaths",
+        "InaccessiblePaths",
+        "ProtectHostname",
+        "LockPersonality",
+        "MemoryDenyWriteExecute",
+        "RestrictRealtime",
+        "RestrictSUIDSGID",
+        "RestrictNamespaces",
+        "SystemCallFilter",
+        "SystemCallArchitectures",
+        "CapabilityBoundingSet",
+        "AmbientCapabilities",
+        "SecureBits",
+        "ProtectClock",
+        "ProtectKernelLogs",
+        "IPAddressDeny",
+        "RestrictAddressFamilies",
+        "PrivateUsers",
         // DynamicUser creates an ephemeral unprivileged UID at runtime; dinit
         // has no equivalent so the service runs as root instead.
-        "DynamicUser", "SupplementaryGroups",
+        "DynamicUser",
+        "SupplementaryGroups",
     ];
     const CGROUP: &[&str] = &[
-        "Slice", "CPUQuota", "MemoryMax", "MemoryHigh", "MemoryLow",
-        "IOWeight", "IODeviceWeight", "TasksMax", "Delegate",
+        "Slice",
+        "CPUQuota",
+        "MemoryMax",
+        "MemoryHigh",
+        "MemoryLow",
+        "IOWeight",
+        "IODeviceWeight",
+        "TasksMax",
+        "Delegate",
     ];
 
     // [Unit] directives that are out of scope
     const CONDITIONALS: &[&str] = &[
-        "ConditionPathExists", "ConditionPathIsDirectory",
-        "ConditionFileNotEmpty", "ConditionDirectoryNotEmpty",
-        "ConditionKernelCommandLine", "ConditionVirtualization",
-        "ConditionArchitecture", "ConditionSecurity",
+        "ConditionPathExists",
+        "ConditionPathIsDirectory",
+        "ConditionFileNotEmpty",
+        "ConditionDirectoryNotEmpty",
+        "ConditionKernelCommandLine",
+        "ConditionVirtualization",
+        "ConditionArchitecture",
+        "ConditionSecurity",
         "AssertPathExists",
     ];
 
     // [Socket] directives that are out of scope
-    const SOCKET: &[&str] = &["ListenStream", "ListenDatagram", "ListenSequentialPacket", "Accept"];
+    const SOCKET: &[&str] = &[
+        "ListenStream",
+        "ListenDatagram",
+        "ListenSequentialPacket",
+        "Accept",
+    ];
 
     // Scan [Service] for sandboxing and cgroup directives
     if let Some(pairs) = unit.sections.get("Service") {

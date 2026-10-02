@@ -69,7 +69,10 @@ ExecStart=/usr/sbin/daemon
 ";
     let unit = SystemdUnit::parse(input, PathBuf::from("test.service")).unwrap();
     let pres = unit.get_all("Service", "ExecStartPre");
-    assert_eq!(pres, vec!["/usr/bin/first", "/usr/bin/second", "-/usr/bin/third"]);
+    assert_eq!(
+        pres,
+        vec!["/usr/bin/first", "/usr/bin/second", "-/usr/bin/third"]
+    );
 }
 
 #[test]
@@ -134,9 +137,15 @@ ExecStart=/usr/sbin/sshd -D -o UsePAM=yes
 
     assert_eq!(unit.get("Service", "Type"), Some("simple"));
     // ExecStartPre was reset then replaced
-    assert_eq!(unit.get_all("Service", "ExecStartPre"), vec!["/usr/bin/custom-keygen"]);
+    assert_eq!(
+        unit.get_all("Service", "ExecStartPre"),
+        vec!["/usr/bin/custom-keygen"]
+    );
     // ExecStart was reset then replaced
-    assert_eq!(unit.get("Service", "ExecStart"), Some("/usr/sbin/sshd -D -o UsePAM=yes"));
+    assert_eq!(
+        unit.get("Service", "ExecStart"),
+        Some("/usr/sbin/sshd -D -o UsePAM=yes")
+    );
     assert_eq!(unit.drop_in_paths.len(), 1);
 }
 

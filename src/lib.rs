@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-pub mod model;
-pub mod error;
-pub mod parser;
-pub mod converter;
-pub mod generator;
 pub mod config;
+pub mod converter;
+pub mod error;
+pub mod generator;
 pub mod hook;
+pub mod model;
+pub mod parser;

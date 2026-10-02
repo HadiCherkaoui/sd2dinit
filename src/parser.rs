@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use crate::error::ParseError;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use crate::error::ParseError;
 
 #[derive(Debug, Clone)]
 pub struct SystemdUnit {
@@ -25,9 +25,7 @@ impl SystemdUnit {
         Self::apply_lines(&mut sections, &joined, &mut parse_warnings, true);
 
         if sections.is_empty() {
-            return Err(ParseError::NoSections {
-                path: source_path,
-            });
+            return Err(ParseError::NoSections { path: source_path });
         }
 
         Ok(SystemdUnit {

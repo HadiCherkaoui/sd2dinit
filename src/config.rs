@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use crate::error::ConfigError;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use serde::Deserialize;
-use crate::error::ConfigError;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
@@ -58,9 +58,8 @@ impl Config {
             source: e,
         })?;
 
-        let mut config: Config = toml::from_str(&content).map_err(|e| ConfigError::ParseError {
-            source: e,
-        })?;
+        let mut config: Config =
+            toml::from_str(&content).map_err(|e| ConfigError::ParseError { source: e })?;
 
         // Merge built-in defaults — user entries take precedence
         let defaults = Self::default();

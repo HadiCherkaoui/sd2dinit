@@ -33,7 +33,6 @@ const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_REPOSITORY"),
 );
 
-
 #[derive(Parser)]
 #[command(
     name = "sd2dinit",
@@ -91,12 +90,27 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Convert { unit_file, output_dir, dry_run, force } => {
-            run_convert(&unit_file, output_dir.as_deref(), dry_run, force)
-        }
-        Commands::Install { unit_file, output_dir, enable, start, dry_run, force } => {
-            run_install(&unit_file, output_dir.as_deref(), enable, start, dry_run, force)
-        }
+        Commands::Convert {
+            unit_file,
+            output_dir,
+            dry_run,
+            force,
+        } => run_convert(&unit_file, output_dir.as_deref(), dry_run, force),
+        Commands::Install {
+            unit_file,
+            output_dir,
+            enable,
+            start,
+            dry_run,
+            force,
+        } => run_install(
+            &unit_file,
+            output_dir.as_deref(),
+            enable,
+            start,
+            dry_run,
+            force,
+        ),
         Commands::Hook => run_hook(),
     };
 
@@ -165,7 +179,11 @@ fn run_convert(
     // Apply drop-in overrides from <unit>.d/*.conf
     let drop_in_dir = {
         let mut p = unit_file.to_path_buf();
-        let name = unit_file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = unit_file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         p.set_file_name(format!("{}.d", name));
         p
     };
@@ -229,20 +247,44 @@ fn run_convert(
 
     if let Some(ref script) = result.pre_script {
         let name = format!("{}-pre.sh", result.main_service.name);
-        write_or_print(&config.output_dir.join(&name), script, dry_run, force, &name)?;
+        write_or_print(
+            &config.output_dir.join(&name),
+            script,
+            dry_run,
+            force,
+            &name,
+        )?;
     }
     if let Some(ref script) = result.post_script {
         let name = format!("{}-post.sh", result.main_service.name);
-        write_or_print(&config.output_dir.join(&name), script, dry_run, force, &name)?;
+        write_or_print(
+            &config.output_dir.join(&name),
+            script,
+            dry_run,
+            force,
+            &name,
+        )?;
     }
     if let Some(ref script) = result.stop_script {
         let name = format!("{}-stop.sh", result.main_service.name);
-        write_or_print(&config.output_dir.join(&name), script, dry_run, force, &name)?;
+        write_or_print(
+            &config.output_dir.join(&name),
+            script,
+            dry_run,
+            force,
+            &name,
+        )?;
     }
 
     if let Some(ref env_content) = result.env_file_content {
         let name = format!("{}.env", result.main_service.name);
-        write_or_print(&config.output_dir.join(&name), env_content, dry_run, force, &name)?;
+        write_or_print(
+            &config.output_dir.join(&name),
+            env_content,
+            dry_run,
+            force,
+            &name,
+        )?;
     }
 
     if !dry_run {
@@ -269,10 +311,16 @@ fn run_install(
 
     if dry_run {
         if enable {
-            eprintln!("{} would run: dinitctl enable <service>", "dry-run:".cyan().bold());
+            eprintln!(
+                "{} would run: dinitctl enable <service>",
+                "dry-run:".cyan().bold()
+            );
         }
         if start {
-            eprintln!("{} would run: dinitctl start <service>", "dry-run:".cyan().bold());
+            eprintln!(
+                "{} would run: dinitctl start <service>",
+                "dry-run:".cyan().bold()
+            );
         }
         return Ok(exit_code);
     }
@@ -292,7 +340,11 @@ fn run_install(
             .status()
             .context("failed to run dinitctl enable")?;
         if !status.success() {
-            eprintln!("{} dinitctl enable {} failed", "error:".red().bold(), service_name);
+            eprintln!(
+                "{} dinitctl enable {} failed",
+                "error:".red().bold(),
+                service_name
+            );
             return Ok(2);
         }
         eprintln!("{} enabled {}", "ok:".green().bold(), service_name);
@@ -304,7 +356,11 @@ fn run_install(
             .status()
             .context("failed to run dinitctl start")?;
         if !status.success() {
-            eprintln!("{} dinitctl start {} failed", "error:".red().bold(), service_name);
+            eprintln!(
+                "{} dinitctl start {} failed",
+                "error:".red().bold(),
+                service_name
+            );
             return Ok(2);
         }
         eprintln!("{} started {}", "ok:".green().bold(), service_name);
@@ -319,7 +375,13 @@ fn run_hook() -> Result<i32> {
     Ok(0)
 }
 
-fn write_or_print(path: &Path, content: &str, dry_run: bool, force: bool, label: &str) -> Result<()> {
+fn write_or_print(
+    path: &Path,
+    content: &str,
+    dry_run: bool,
+    force: bool,
+    label: &str,
+) -> Result<()> {
     if dry_run {
         println!("\n--- {} ---", label.bold());
         println!("{}", content);
@@ -340,8 +402,7 @@ fn write_or_print(path: &Path, content: &str, dry_run: bool, force: bool, label:
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 
-    fs::write(path, content)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
 
     // Make shell scripts executable on Unix
     #[cfg(unix)]
