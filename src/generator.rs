@@ -31,6 +31,10 @@ pub fn generate(service: &DinitService) -> String {
         out.push_str(&format!("stop-command = {}\n", cmd));
     }
 
+    if let Some(ref signal) = service.term_signal {
+        out.push_str(&format!("term-signal = {}\n", signal));
+    }
+
     // Run-as
     if let Some(ref user) = service.user {
         out.push_str(&format!("run-as = {}\n", user));

@@ -33,7 +33,14 @@ fn remove_unit(name: &str, output_dir: &Path) {
 
     // All file suffixes that sd2dinit may have generated for this service.
     const SUFFIXES: &[&str] = &[
-        "", "-pre", "-post", "-pre.sh", "-post.sh", "-stop.sh", ".env",
+        "",
+        "-pre",
+        "-post",
+        "-pre.sh",
+        "-post.sh",
+        "-start.sh",
+        "-stop.sh",
+        ".env",
     ];
 
     for suffix in SUFFIXES {
@@ -247,6 +254,13 @@ fn convert_unit(
         write_script_file(
             output_dir,
             &format!("{}-post.sh", result.main_service.name),
+            script,
+        )?;
+    }
+    if let Some(ref script) = result.start_script {
+        write_script_file(
+            output_dir,
+            &format!("{}-start.sh", result.main_service.name),
             script,
         )?;
     }

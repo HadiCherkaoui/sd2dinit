@@ -93,7 +93,9 @@ WantedBy=multi-user.target
     assert!(output.contains("type = bgprocess\n"));
     assert!(output.contains("pid-file = /run/nginx.pid\n"));
     assert!(output.contains("command = /usr/bin/nginx\n"));
-    assert!(output.contains("stop-command = /bin/kill -s QUIT $MAINPID\n"));
+    // dinit has no $MAINPID; it sends term-signal itself when no stop command is set
+    assert!(output.contains("term-signal = QUIT\n"));
+    assert!(!output.contains("stop-command"));
     assert!(output.contains("run-as = root\n"));
     // Pre service generated for ExecStartPre
     assert!(result.pre_service.is_some());

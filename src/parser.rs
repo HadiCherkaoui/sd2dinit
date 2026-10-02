@@ -4,6 +4,7 @@
 
 use crate::error::ParseError;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -37,7 +38,15 @@ impl SystemdUnit {
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .filter(|p| p.extension().is_some_and(|x| x == "conf"))
                 .collect(),
-            Err(_) => Vec::new(),
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                Vec::new()
+            }
+            Err(source) => {
+                return Err(ParseError::IoError {
+                    path: drop_in_dir.into(),
+                    source,
+                });
+            }
         };
         drop_ins.sort();
         for drop_in in drop_ins {

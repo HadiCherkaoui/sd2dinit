@@ -331,9 +331,14 @@ fn before_wins_over_a_pull_in_of_the_same_service() {
         vec!["network.target".to_string(), "dbus".to_string()]
     );
     assert!(svc.waits_for.is_empty() && svc.depends_on.is_empty() && svc.after.is_empty());
-    assert!(result.warnings.iter().any(|w| w.directive == "Before"
-        && w.severity == Severity::Warn
-        && w.message.contains("network.target")));
+    for (directive, dep) in [("Wants", "network.target"), ("Requires", "dbus.service")] {
+        assert!(
+            result.warnings.iter().any(|w| w.directive == directive
+                && w.severity == Severity::Warn
+                && w.message.contains(dep)),
+            "{directive}={dep}"
+        );
+    }
 }
 
 #[test]
@@ -349,12 +354,15 @@ fn numeric_user_warns_that_dinit_keeps_its_own_group() {
 }
 
 #[test]
-fn colon_stop_command_in_a_stop_script_uses_shell_escaping() {
+fn colon_stop_command_in_a_stop_script_keeps_its_dollar_literal() {
     let result = convert_unit(
         "[Service]\nExecStart=/usr/bin/d\nExecStop=:/bin/kill -TERM $MAINPID\nExecStopPost=/usr/bin/cleanup\n",
     );
     let script = result.stop_script.unwrap();
-    assert!(script.contains("/bin/kill -TERM \\$MAINPID\n"), "{script}");
+    assert!(
+        script.contains("/bin/kill -TERM '$MAINPID' || rc=$?\n"),
+        "{script}"
+    );
     assert!(!script.contains("$$"), "{script}");
 }
 
@@ -389,6 +397,9 @@ fn restart_sec_understands_the_remaining_systemd_units() {
         ("1w", 604_800.0),
         ("1500000ns", 0.0015),
         ("250µs", 0.00025),
+        ("3μs", 0.000003),
+        ("1M", 2_629_800.0),
+        ("1y", 31_557_600.0),
         ("1h 1m", 3_660.0),
     ] {
         let result = convert_unit(&format!(
@@ -400,4 +411,93 @@ fn restart_sec_understands_the_remaining_systemd_units() {
             "RestartSec={span}"
         );
     }
+}
+
+#[test]
+fn numeric_user_does_not_hide_a_differing_group() {
+    let result = convert_unit("[Service]\nExecStart=/usr/bin/d\nUser=1000\nGroup=wheel\n");
+    for directive in ["User", "Group"] {
+        assert!(
+            result.warnings.iter().any(|w| w.directive == directive),
+            "{directive}"
+        );
+    }
+}
+
+#[test]
+fn after_and_before_on_one_service_keeps_before_and_says_so() {
+    let result = convert_unit(
+        "[Unit]\nAfter=dbus.service\nBefore=dbus.service\n[Service]\nExecStart=/usr/bin/d\n",
+    );
+    assert_eq!(result.main_service.before, vec!["dbus".to_string()]);
+    assert!(result.main_service.after.is_empty());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.directive == "After" && w.severity == Severity::Warn)
+    );
+}
+
+#[test]
+fn pre_service_shares_the_environment_and_dependencies() {
+    let result = convert_unit(
+        "[Unit]\nWants=network-online.target\nAfter=network-online.target\n[Service]\nEnvironment=A=1\nExecStartPre=/usr/bin/prep $A\nExecStart=/usr/bin/d\n",
+    );
+    let pre = result.pre_service.unwrap();
+    assert_eq!(pre.env_files, result.main_service.env_files);
+    assert!(!pre.env_files.is_empty());
+    assert_eq!(pre.waits_for, vec!["network-online.target".to_string()]);
+}
+
+#[test]
+fn post_service_says_it_has_to_be_enabled() {
+    let result = convert_unit("[Service]\nExecStart=/usr/bin/d\nExecStartPost=/usr/bin/announce\n");
+    assert!(result.post_service.is_some());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.directive == "ExecStartPost" && w.message.contains("test-post"))
+    );
+}
+
+#[test]
+fn oneshot_runs_every_exec_start_line_in_order() {
+    let result = convert_unit(
+        "[Service]\nType=oneshot\nExecStart=/usr/bin/one\nExecStart=-/usr/bin/two\nExecStart=/usr/bin/three\n",
+    );
+    let script = result.start_script.unwrap();
+    assert!(
+        script.ends_with("/usr/bin/one\n/usr/bin/two || true\n/usr/bin/three\n"),
+        "{script}"
+    );
+    assert_eq!(
+        result.main_service.command.as_deref(),
+        Some("/bin/sh /etc/dinit.d/test-start.sh")
+    );
+}
+
+#[test]
+fn oneshot_exec_start_that_may_fail_runs_through_a_script() {
+    let result = convert_unit("[Service]\nType=oneshot\nExecStart=-/usr/bin/flaky\n");
+    assert!(
+        result
+            .start_script
+            .unwrap()
+            .contains("/usr/bin/flaky || true\n")
+    );
+}
+
+#[test]
+fn several_exec_start_lines_outside_oneshot_keep_the_last() {
+    let result = convert_unit("[Service]\nExecStart=/usr/bin/old\nExecStart=/usr/bin/new\n");
+    assert_eq!(result.main_service.command.as_deref(), Some("/usr/bin/new"));
+    assert!(result.start_script.is_none());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.directive == "ExecStart" && w.severity == Severity::Warn)
+    );
 }

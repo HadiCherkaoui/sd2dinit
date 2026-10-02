@@ -39,6 +39,8 @@ pub struct DinitService {
     pub service_type: DinitType,
     pub command: Option<String>,
     pub stop_command: Option<String>,
+    /// Signal dinit stops the process with when no stop command is set; `None` is TERM.
+    pub term_signal: Option<String>,
     /// dinit's `run-as` takes only a user; the group is that user's primary group.
     pub user: Option<String>,
     pub working_dir: Option<PathBuf>,
@@ -62,6 +64,8 @@ pub struct ConversionResult {
     pub post_service: Option<DinitService>,
     pub pre_script: Option<String>,
     pub post_script: Option<String>,
+    /// Runs several oneshot `ExecStart=` lines, or one that may fail.
+    pub start_script: Option<String>,
     pub stop_script: Option<String>,
     pub env_file_content: Option<String>,
     pub warnings: Vec<Warning>,

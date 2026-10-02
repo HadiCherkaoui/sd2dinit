@@ -162,3 +162,34 @@ fn user_units_point_at_files_in_the_user_output_dir() {
     assert!(pre.contains(&user_out.display().to_string()), "{pre}");
     fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn hook_applies_drop_ins() {
+    let root = scratch("drop-ins");
+    let units = root.join("usr/lib/systemd/system");
+    fs::create_dir_all(units.join("app.service.d")).unwrap();
+    fs::write(
+        units.join("app.service"),
+        "[Service]\nExecStart=/usr/bin/old\n",
+    )
+    .unwrap();
+    fs::write(
+        units.join("app.service.d/override.conf"),
+        "[Service]\nExecStart=\nExecStart=/usr/bin/new\n",
+    )
+    .unwrap();
+
+    let out = root.join("dinit.d");
+    let config = Config {
+        output_dir: out.clone(),
+        user_output_dir: out.join("user"),
+        service_dirs: Vec::new(),
+        user_service_dirs: Vec::new(),
+        ..Config::default()
+    };
+    process_targets(&[units.join("app.service").display().to_string()], &config);
+
+    let app = fs::read_to_string(out.join("app")).unwrap();
+    assert!(app.contains("command = /usr/bin/new\n"), "{app}");
+    fs::remove_dir_all(&root).unwrap();
+}

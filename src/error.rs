@@ -7,7 +7,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ParseError {
-    #[error("failed to read {path}: {source}")]
+    #[error("failed to read {path}")]
     IoError {
         path: PathBuf,
         source: std::io::Error,
@@ -26,11 +26,11 @@ pub enum ConvertError {
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
-    #[error("failed to read config at {path}: {source}")]
+    #[error("failed to read config at {path}")]
     IoError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("failed to parse config: {source}")]
+    #[error("failed to parse config")]
     ParseError { source: toml::de::Error },
 }

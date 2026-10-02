@@ -69,12 +69,23 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Loads the first config file that exists, or the defaults if none does.
+    ///
+    /// The user's `sd2dinit/config.toml` under [`config_home`] is tried before
+    /// `/etc/sd2dinit/config.toml`, which is what the pacman hook running as
+    /// root normally reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when that file cannot be read or parsed.
     pub fn load() -> Result<Self, ConfigError> {
-        let config_path = config_file_path();
-
-        if !config_path.exists() {
+        let candidates = config_home()
+            .map(|dir| dir.join("sd2dinit/config.toml"))
+            .into_iter()
+            .chain([PathBuf::from("/etc/sd2dinit/config.toml")]);
+        let Some(config_path) = candidates.into_iter().find(|path| path.exists()) else {
             return Ok(Self::default());
-        }
+        };
 
         let content = std::fs::read_to_string(&config_path).map_err(|e| ConfigError::IoError {
             path: config_path.clone(),
@@ -85,12 +96,15 @@ impl Config {
     }
 }
 
-fn config_file_path() -> std::path::PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        std::path::PathBuf::from(xdg).join("sd2dinit/config.toml")
-    } else if let Ok(home) = std::env::var("HOME") {
-        std::path::PathBuf::from(home).join(".config/sd2dinit/config.toml")
-    } else {
-        std::path::PathBuf::from("/etc/sd2dinit/config.toml")
-    }
+/// The XDG config directory: `$XDG_CONFIG_HOME`, else `$HOME/.config`.
+///
+/// An empty variable counts as unset, as the XDG spec says.
+#[must_use]
+pub fn config_home() -> Option<PathBuf> {
+    let var = |name| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|home| home.join(".config")))
 }

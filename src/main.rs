@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
 
-use sd2dinit::config::Config;
+use sd2dinit::config::{Config, config_home};
 use sd2dinit::converter;
 use sd2dinit::generator;
 use sd2dinit::hook::is_user_unit;
@@ -97,7 +97,8 @@ fn main() {
             output_dir,
             dry_run,
             force,
-        } => run_convert(&unit_file, output_dir.as_deref(), dry_run, force),
+        } => run_convert(&unit_file, output_dir.as_deref(), dry_run, force)
+            .map(|converted| converted.exit_code),
         Commands::Install {
             unit_file,
             output_dir,
@@ -125,20 +126,39 @@ fn main() {
     }
 }
 
+/// What [`run_convert`] produced, for `install` to act on.
+struct Converted {
+    exit_code: i32,
+    /// The main service, then its `-post` helper, which dinit does not start by itself.
+    services: Vec<String>,
+    user: bool,
+}
+
+impl Converted {
+    fn skipped(user: bool) -> Self {
+        Self {
+            exit_code: 1,
+            services: Vec::new(),
+            user,
+        }
+    }
+}
+
 fn run_convert(
     unit_file: &Path,
     output_dir: Option<&Path>,
     dry_run: bool,
     force: bool,
-) -> Result<i32> {
+) -> Result<Converted> {
     let mut config = Config::load().context("failed to load config")?;
 
-    // The converter writes script paths relative to output_dir, so it must be final here
+    // The converter derives script and env-file paths from output_dir, so it must be final here
     let user = is_user_unit(unit_file);
     if let Some(dir) = output_dir {
         config.output_dir = dir.to_path_buf();
     } else if user {
-        config.output_dir = config.user_output_dir.clone();
+        config.output_dir =
+            own_unit_output_dir(unit_file).unwrap_or_else(|| config.user_output_dir.clone());
     }
 
     // Reject non-.service files (including extension-less files)
@@ -151,7 +171,7 @@ fn run_convert(
                 ext,
                 unit_file.display()
             );
-            return Ok(1);
+            return Ok(Converted::skipped(user));
         }
         None => {
             eprintln!(
@@ -159,7 +179,7 @@ fn run_convert(
                 "warning:".yellow().bold(),
                 unit_file.display()
             );
-            return Ok(1);
+            return Ok(Converted::skipped(user));
         }
     }
 
@@ -172,19 +192,22 @@ fn run_convert(
             "warning:".yellow().bold(),
             unit_file.display()
         );
-        return Ok(1);
+        return Ok(Converted::skipped(user));
     }
 
     let unit = SystemdUnit::load(unit_file)
         .with_context(|| format!("failed to load {}", unit_file.display()))?;
 
     let mut service_dirs = if user {
-        let mut dirs = config.user_service_dirs.clone();
-        dirs.extend(own_user_service_dirs());
-        dirs
+        config.user_service_dirs.clone()
     } else {
         config.service_dirs.clone()
     };
+    let own_dirs = own_user_service_dirs();
+    // A shared user service must not depend on one that only the caller has
+    if user && own_dirs.contains(&config.output_dir) {
+        service_dirs.extend(own_dirs);
+    }
     service_dirs.push(config.output_dir.clone());
     let known = KnownServices::scan(&service_dirs);
 
@@ -252,6 +275,16 @@ fn run_convert(
             &name,
         )?;
     }
+    if let Some(ref script) = result.start_script {
+        let name = format!("{}-start.sh", result.main_service.name);
+        write_or_print(
+            &config.output_dir.join(&name),
+            script,
+            dry_run,
+            force,
+            &name,
+        )?;
+    }
     if let Some(ref script) = result.stop_script {
         let name = format!("{}-stop.sh", result.main_service.name);
         write_or_print(
@@ -283,7 +316,22 @@ fn run_convert(
         );
     }
 
-    Ok(if had_warnings { 1 } else { 0 })
+    let mut services = vec![result.main_service.name.clone()];
+    services.extend(result.post_service.map(|post| post.name));
+    Ok(Converted {
+        exit_code: if had_warnings { 1 } else { 0 },
+        services,
+        user,
+    })
+}
+
+/// `~/.config/dinit.d` for a unit from the caller's own `~/.config/systemd/user`.
+fn own_unit_output_dir(unit_file: &Path) -> Option<PathBuf> {
+    let config_home = config_home()?;
+    let unit_file = std::path::absolute(unit_file).ok()?;
+    unit_file
+        .starts_with(config_home.join("systemd/user"))
+        .then(|| config_home.join("dinit.d"))
 }
 
 /// The calling user's own dinit service directories, as a user dinit instance searches them.
@@ -306,66 +354,48 @@ fn run_install(
     dry_run: bool,
     force: bool,
 ) -> Result<i32> {
-    let exit_code = run_convert(unit_file, output_dir, dry_run, force)?;
+    let converted = run_convert(unit_file, output_dir, dry_run, force)?;
+    // Without --user, dinitctl run as root talks to the system instance
+    let scope = if converted.user { "--user " } else { "" };
 
-    if dry_run {
-        if enable {
-            eprintln!(
-                "{} would run: dinitctl enable <service>",
-                "dry-run:".cyan().bold()
-            );
+    for (action, done, wanted) in [("enable", "enabled", enable), ("start", "started", start)] {
+        if !wanted {
+            continue;
         }
-        if start {
-            eprintln!(
-                "{} would run: dinitctl start <service>",
-                "dry-run:".cyan().bold()
-            );
+        for service in &converted.services {
+            if dry_run {
+                eprintln!(
+                    "{} would run: dinitctl {scope}{action} {service}",
+                    "dry-run:".cyan().bold()
+                );
+                continue;
+            }
+            let mut dinitctl = process::Command::new("dinitctl");
+            if converted.user {
+                dinitctl.arg("--user");
+            }
+            let status = dinitctl
+                .args([action, service])
+                .status()
+                .with_context(|| format!("failed to run dinitctl {action}"))?;
+            if !status.success() {
+                eprintln!(
+                    "{} dinitctl {scope}{action} {service} failed",
+                    "error:".red().bold()
+                );
+                if converted.user {
+                    eprintln!(
+                        "{} user services belong to each user's dinit: run `dinitctl {action} {service}` as that user",
+                        "hint:".cyan().bold()
+                    );
+                }
+                return Ok(2);
+            }
+            eprintln!("{} {done} {service}", "ok:".green().bold());
         }
-        return Ok(exit_code);
     }
 
-    if exit_code == 2 {
-        return Ok(2);
-    }
-
-    let service_name = unit_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
-
-    if enable {
-        let status = process::Command::new("dinitctl")
-            .args(["enable", service_name])
-            .status()
-            .context("failed to run dinitctl enable")?;
-        if !status.success() {
-            eprintln!(
-                "{} dinitctl enable {} failed",
-                "error:".red().bold(),
-                service_name
-            );
-            return Ok(2);
-        }
-        eprintln!("{} enabled {}", "ok:".green().bold(), service_name);
-    }
-
-    if start {
-        let status = process::Command::new("dinitctl")
-            .args(["start", service_name])
-            .status()
-            .context("failed to run dinitctl start")?;
-        if !status.success() {
-            eprintln!(
-                "{} dinitctl start {} failed",
-                "error:".red().bold(),
-                service_name
-            );
-            return Ok(2);
-        }
-        eprintln!("{} started {}", "ok:".green().bold(), service_name);
-    }
-
-    Ok(exit_code)
+    Ok(converted.exit_code)
 }
 
 fn run_hook() -> Result<i32> {

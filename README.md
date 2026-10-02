@@ -135,10 +135,17 @@ For a service like `nginx.service`:
 | Input | Generated output |
 |---|---|
 | `ExecStart=` | `nginx` (main service file) |
-| `ExecStartPre=` | `nginx-pre` (scripted service) |
-| `ExecStartPost=` | `nginx-post` (scripted service) |
+| several `ExecStart=` (`Type=oneshot`) | `nginx-start.sh` (runs them in order) |
+| `ExecStartPre=` | `nginx-pre` (scripted service the main one depends on) |
+| `ExecStartPost=` | `nginx-post` (scripted service, see below) |
 | `Environment=` | `nginx.env` (env file) |
-| `ExecStop=` + `ExecStopPost=` | `nginx-stop.sh` (wrapper script) |
+| several `ExecStop=`, or `ExecStop=` + `ExecStopPost=` | `nginx-stop.sh` (wrapper script) |
+
+`nginx-pre` gets the main service's environment and dependencies, so it runs
+after them as `ExecStartPre=` does under systemd. dinit has no post-start hook:
+`nginx-post` waits for `nginx` but only runs when it is enabled itself.
+`sd2dinit install --enable` enables both; after a hook conversion, run
+`dinitctl enable nginx-post` too.
 
 Exit codes: `0` = success, `1` = success with warnings, `2` = failure.
 
@@ -146,7 +153,9 @@ Exit codes: `0` = success, `1` = success with warnings, `2` = failure.
 
 ## Configuration
 
-Create `~/.config/sd2dinit/config.toml`:
+Create `~/.config/sd2dinit/config.toml` (or `$XDG_CONFIG_HOME/sd2dinit/config.toml`).
+If it does not exist, `/etc/sd2dinit/config.toml` is read instead, which is
+where the pacman hook running as root picks up a system-wide config:
 
 ```toml
 # Where to write generated dinit service files (default: /etc/dinit.d)
@@ -177,8 +186,13 @@ dinit refuses to load a service whose `depends-on` or `waits-for` names a
 service it cannot find, so each systemd dependency is matched against the
 services that actually exist in `service_dirs` (or `user_service_dirs` for user
 units) and the output directory, plus the units that convert in the same pacman
-transaction. `sd2dinit convert` run on a user unit also looks in your own
-`$XDG_CONFIG_HOME/dinit.d` and `~/.config/dinit.d`, as your dinit instance does:
+transaction.
+
+`sd2dinit convert` writes a unit from `~/.config/systemd/user` to your own
+`~/.config/dinit.d`, and any other user unit to `user_output_dir`. Only when it
+writes into your own directory does it also resolve against `$XDG_CONFIG_HOME/dinit.d`
+and `~/.config/dinit.d`; a service in the shared directory must not depend on
+something only you have. Each candidate is matched in this order:
 
 1. an entry in `dependency_map`, used as-is even if no such service exists yet;
 2. the exact name, e.g. `network.target` (Artix ships it);
@@ -246,7 +260,10 @@ so `User=` becomes `run-as`. A `Group=` that differs from the user, or a
 `Group=` without `User=`, is reported and dropped.
 
 A numeric `User=` is kept but warned about: given a UID, dinit keeps its own
-group (root) and drops supplementary groups. Use the user name instead.
+group and drops supplementary groups. Use the user name instead.
+
+User services belong to each user's dinit instance: `sd2dinit install --enable`
+calls `dinitctl --user` for them, so run it as that user, not through `doas`.
 
 ### Restart
 
@@ -260,6 +277,24 @@ group (root) and drops supplementary groups. Use the user name instead.
 `RestartSec=` accepts systemd time spans (`3`, `500ms`, `1min 30s`, `2d`, from
 `ns` up to `y`) and becomes `restart-delay` in seconds.
 
+### Command lines
+
+systemd runs `Exec*=` lines without a shell, after unquoting them itself, so
+sd2dinit splits each line into the same argv systemd would and quotes every word
+again for where it ends up: dinit only understands double quotes, and a
+generated `/bin/sh` script would otherwise expand `*`, `~` or `;`.
+
+- `'…'`, `"…"` and C escapes such as `\s` and `\x41` are unquoted as systemd does.
+- `$VAR` standing alone splits into words (dinit's `$/VAR`), `${VAR}` is always
+  one word, `$$` is a literal `$`, and a bare `$VAR` inside a word stays literal,
+  all as in systemd.
+- `%n`, `%N`, `%p` and `%%` are expanded; other specifiers are dropped with a warning.
+- dinit never sets `$MAINPID`. A lone `ExecStop=kill [-SIG] $MAINPID` is dropped
+  and its signal becomes `term-signal`, since dinit signals the process itself
+  when no stop command is set; any other use of `$MAINPID` is warned about.
+- `ExecStopPost=` runs even when `ExecStop=` fails, and the stop script then
+  exits with `ExecStop=`'s status.
+
 ### Exec prefixes
 
 systemd's special prefixes on `ExecStart=`, `ExecStop=`, `ExecStartPre=`,
@@ -267,11 +302,11 @@ systemd's special prefixes on `ExecStart=`, `ExecStop=`, `ExecStartPre=`,
 
 | Prefix | Handling |
 |---|---|
-| `-` | lines in generated scripts get `\|\| true`; on `ExecStart=`, or `ExecStop=` without `ExecStopPost=`, it is reported and dropped |
-| `:` | `$` is escaped so no variable is substituted |
+| `-` | lines in generated scripts get `\|\| true`, including a oneshot's `ExecStart=`; on any other `ExecStart=`, or a lone `ExecStop=`, it is reported and dropped |
+| `:` | no variable is substituted; `$` stays literal in dinit and in scripts |
 | `@` | dinit cannot set argv[0]; the argv[0] word is dropped with a warning |
-| prefix only, no command | `ExecStart=` is treated as missing and the unit is not converted |
-| `+`, `!`, `!!` | full-privilege execution is not supported; warning emitted |
+| `+`, `!`, `!!`, `\|` | full privileges and running through the user's shell are not supported; warning emitted |
+| prefix only, no command | the line is dropped with a warning; without a usable `ExecStart=` the unit is not converted |
 
 ### Out of scope (warnings emitted, directives skipped)
 

@@ -13,6 +13,7 @@ fn minimal_service() -> DinitService {
         service_type: DinitType::Process,
         command: Some("/usr/bin/test-daemon".into()),
         stop_command: None,
+        term_signal: None,
         user: None,
         working_dir: None,
         env_files: Vec::new(),
@@ -134,6 +135,7 @@ fn test_generate_full_service() {
         service_type: DinitType::Process,
         command: Some("/usr/bin/sshd -D".into()),
         stop_command: Some("/bin/kill -QUIT $PID".into()),
+        term_signal: Some("QUIT".into()),
         user: Some("root".into()),
         working_dir: Some(PathBuf::from("/var/run/sshd")),
         env_files: vec![PathBuf::from("/etc/dinit.d/sshd.env")],
@@ -152,6 +154,7 @@ fn test_generate_full_service() {
     assert!(output.contains("type = process\n"));
     assert!(output.contains("command = /usr/bin/sshd -D\n"));
     assert!(output.contains("stop-command = /bin/kill -QUIT $PID\n"));
+    assert!(output.contains("term-signal = QUIT\n"));
     assert!(output.contains("run-as = root\n"));
     assert!(output.contains("working-dir = /var/run/sshd\n"));
     assert!(output.contains("logfile = /var/log/sshd.log\n"));

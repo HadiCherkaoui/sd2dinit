@@ -289,3 +289,41 @@ ExecStartPre=
     // Other keys unaffected
     assert_eq!(unit.get("Service", "ExecStart"), Some("/usr/bin/daemon"));
 }
+
+#[test]
+fn load_merges_drop_ins_in_name_order() {
+    let dir = std::env::temp_dir().join(format!("sd2dinit-load-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let drop_ins = dir.join("app.service.d");
+    std::fs::create_dir_all(&drop_ins).unwrap();
+    let unit = dir.join("app.service");
+    std::fs::write(&unit, "[Service]\nExecStart=/usr/bin/old\nUser=app\n").unwrap();
+    std::fs::write(drop_ins.join("20-last.conf"), "[Service]\nUser=last\n").unwrap();
+    std::fs::write(
+        drop_ins.join("10-first.conf"),
+        "[Service]\nExecStart=\nExecStart=/usr/bin/new\nUser=first\n",
+    )
+    .unwrap();
+    std::fs::write(drop_ins.join("ignored.txt"), "[Service]\nUser=nobody\n").unwrap();
+
+    let loaded = SystemdUnit::load(&unit).unwrap();
+    assert_eq!(loaded.get_all("Service", "ExecStart"), vec!["/usr/bin/new"]);
+    assert_eq!(loaded.get("Service", "User"), Some("last"));
+    assert_eq!(loaded.drop_in_paths.len(), 2);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn load_without_drop_ins_reads_the_unit_alone() {
+    let dir = std::env::temp_dir().join(format!("sd2dinit-load-plain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let unit = dir.join("plain.service");
+    std::fs::write(&unit, "[Service]\nExecStart=/usr/bin/plain\n").unwrap();
+
+    let loaded = SystemdUnit::load(&unit).unwrap();
+    assert_eq!(loaded.get("Service", "ExecStart"), Some("/usr/bin/plain"));
+    assert!(loaded.drop_in_paths.is_empty());
+    assert!(SystemdUnit::load(&dir.join("missing.service")).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
