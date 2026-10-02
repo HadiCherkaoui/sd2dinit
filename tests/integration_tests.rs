@@ -6,12 +6,26 @@ use sd2dinit::config::Config;
 use sd2dinit::converter;
 use sd2dinit::generator;
 use sd2dinit::parser::SystemdUnit;
+use sd2dinit::services::KnownServices;
 use std::path::PathBuf;
+
+/// Services an Artix system ships that the units below refer to.
+fn known() -> KnownServices {
+    [
+        "network.target",
+        "network-online.target",
+        "sshdgenkeys",
+        "containerd",
+        "docker",
+    ]
+    .into_iter()
+    .collect()
+}
 
 fn full_convert(input: &str, filename: &str) -> (String, Vec<sd2dinit::model::Warning>) {
     let unit = SystemdUnit::parse(input, PathBuf::from(filename)).unwrap();
     let config = Config::default();
-    let result = converter::convert(&unit, &config).unwrap();
+    let result = converter::convert(&unit, &config, &known()).unwrap();
     (generator::generate(&result.main_service), result.warnings)
 }
 
@@ -41,9 +55,11 @@ WantedBy=multi-user.target
     assert!(output.contains("command = /usr/bin/sshd -D\n"));
     assert!(output.contains("restart = true\n"));
     assert!(output.contains("smooth-recovery = true\n"));
-    assert!(output.contains("depends-ms = sshdgenkeys\n"));
+    // Wants+After on the same unit collapse into the stronger waits-for
     assert!(output.contains("waits-for = sshdgenkeys\n"));
-    assert!(output.contains("waits-for = network\n"));
+    assert!(!output.contains("after = sshdgenkeys\n"));
+    assert!(output.contains("after = network.target\n"));
+    assert!(!output.contains("depends-ms"));
 }
 
 #[test]
@@ -71,7 +87,7 @@ WantedBy=multi-user.target
     )
     .unwrap();
     let config = Config::default();
-    let result = converter::convert(&unit, &config).unwrap();
+    let result = converter::convert(&unit, &config, &known()).unwrap();
     let output = generator::generate(&result.main_service);
 
     assert!(output.contains("type = bgprocess\n"));
@@ -82,9 +98,8 @@ WantedBy=multi-user.target
     // Pre service generated for ExecStartPre
     assert!(result.pre_service.is_some());
     assert!(output.contains("depends-on = nginx-pre\n"));
-    // network-online.target → network
-    assert!(output.contains("depends-ms = network\n"));
-    assert!(output.contains("waits-for = network\n"));
+    assert!(output.contains("waits-for = network-online.target\n"));
+    assert!(!output.contains("after = network-online.target\n"));
     // should_enable from WantedBy
     assert!(result.should_enable);
 }
@@ -116,11 +131,10 @@ WantedBy=multi-user.target
     assert!(output.contains("type = process\n"));
     assert!(output.contains("restart = true\n"));
     assert!(output.contains("restart-delay = 2\n"));
-    // docker.socket → docker (strip .socket suffix not in dep map, strip .socket)
-    assert!(output.contains("depends-on = docker\n"));
-    // network-online.target → network
-    assert!(output.contains("depends-ms = network\n"));
-    assert!(output.contains("depends-ms = containerd\n"));
+    // docker.socket strips to this very service, so the self-dependency is dropped
+    assert!(!output.contains("depends-on = docker\n"));
+    assert!(output.contains("waits-for = network-online.target\n"));
+    assert!(output.contains("waits-for = containerd\n"));
     // notify warning
     assert!(warnings.iter().any(|w| w.message.contains("notify")));
     // cgroup warnings for TasksMax, Delegate
@@ -148,7 +162,7 @@ WorkingDirectory=/
     )
     .unwrap();
     let config = Config::default();
-    let result = converter::convert(&unit, &config).unwrap();
+    let result = converter::convert(&unit, &config, &known()).unwrap();
     let output = generator::generate(&result.main_service);
 
     assert!(output.contains("type = scripted\n"));
@@ -191,7 +205,7 @@ Restart=always
     );
 
     let config = Config::default();
-    let result = converter::convert(&unit, &config).unwrap();
+    let result = converter::convert(&unit, &config, &known()).unwrap();
     let output = generator::generate(&result.main_service);
 
     // ExecStart unchanged (not reset in drop-in)
@@ -223,7 +237,7 @@ ExecStart=/usr/bin/daemon
     )
     .unwrap();
     let config = Config::default();
-    let result = converter::convert(&unit, &config).unwrap();
+    let result = converter::convert(&unit, &config, &known()).unwrap();
 
     assert!(result.pre_script.is_some());
     let script = result.pre_script.unwrap();
@@ -269,19 +283,19 @@ WantedBy=multi-user.target
     )
     .unwrap();
     let config = Config::default();
-    let result = converter::convert(&unit, &config).unwrap();
+    let result = converter::convert(&unit, &config, &known()).unwrap();
     let output = generator::generate(&result.main_service);
 
     assert!(output.contains("type = process\n"));
     assert!(output.contains("command = /usr/bin/myapp --config /etc/myapp/config.toml\n"));
     assert!(output.contains("stop-command = /usr/bin/myapp-stop\n"));
-    assert!(output.contains("run-as = myapp:myapp\n"));
+    assert!(output.contains("run-as = myapp\n"));
     assert!(output.contains("working-dir = /var/lib/myapp\n"));
     assert!(output.contains("restart = on-failure\n"));
     assert!(output.contains("smooth-recovery = true\n"));
     assert!(output.contains("restart-delay = 10\n"));
-    assert!(output.contains("waits-for = network\n"));
-    assert!(output.contains("depends-ms = network\n"));
+    assert!(output.contains("waits-for = network-online.target\n"));
+    assert!(!output.contains("depends-ms"));
     // Environment= generates .env with single-quoted value;
     // /etc/myapp/environment does not exist so EnvironmentFile= is skipped.
     assert!(result.env_file_content.is_some());

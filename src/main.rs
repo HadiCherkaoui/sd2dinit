@@ -13,8 +13,10 @@ use colored::*;
 use sd2dinit::config::Config;
 use sd2dinit::converter;
 use sd2dinit::generator;
+use sd2dinit::hook::is_user_unit;
 use sd2dinit::model::Severity;
 use sd2dinit::parser::SystemdUnit;
+use sd2dinit::services::KnownServices;
 /// Attribution shown by `--help`, and by `--version` alongside the version.
 ///
 /// The binary carries the credit and the source offer itself, so both survive
@@ -201,7 +203,15 @@ fn run_convert(
         }
     }
 
-    let result = converter::convert(&unit, &config)
+    let mut service_dirs = if is_user_unit(unit_file) {
+        config.user_service_dirs.clone()
+    } else {
+        config.service_dirs.clone()
+    };
+    service_dirs.push(config.output_dir.clone());
+    let known = KnownServices::scan(&service_dirs);
+
+    let result = converter::convert(&unit, &config, &known)
         .with_context(|| format!("failed to convert {}", unit_file.display()))?;
 
     let mut had_warnings = false;

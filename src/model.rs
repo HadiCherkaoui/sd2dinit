@@ -39,8 +39,8 @@ pub struct DinitService {
     pub service_type: DinitType,
     pub command: Option<String>,
     pub stop_command: Option<String>,
+    /// dinit's `run-as` takes only a user; the group is that user's primary group.
     pub user: Option<String>,
-    pub group: Option<String>,
     pub working_dir: Option<PathBuf>,
     pub env_files: Vec<PathBuf>,
     pub pid_file: Option<PathBuf>,
@@ -48,8 +48,10 @@ pub struct DinitService {
     pub smooth_recovery: bool,
     pub restart_delay: Option<f64>,
     pub depends_on: Vec<String>,
-    pub depends_ms: Vec<String>,
     pub waits_for: Vec<String>,
+    /// Ordering only: wait for these if they are starting, but never start them.
+    pub after: Vec<String>,
+    pub before: Vec<String>,
     pub logfile: Option<PathBuf>,
 }
 

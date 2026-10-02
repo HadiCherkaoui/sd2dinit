@@ -10,10 +10,12 @@ use crate::converter;
 use crate::generator;
 use crate::model::Severity;
 use crate::parser::SystemdUnit;
+use crate::services::KnownServices;
 
 /// Returns `true` when `path` is a user-scope systemd unit
 /// (`usr/lib/systemd/user/` or `/usr/lib/systemd/user/`).
-fn is_user_unit(path: &Path) -> bool {
+#[must_use]
+pub fn is_user_unit(path: &Path) -> bool {
     path.components()
         .zip(path.components().skip(1))
         .any(|(a, b)| a.as_os_str() == "systemd" && b.as_os_str() == "user")
@@ -45,33 +47,57 @@ fn remove_unit(name: &str, output_dir: &Path) {
     }
 }
 
+/// One `.service` path from pacman's target list that sd2dinit acts on.
+#[derive(Debug)]
+struct Target {
+    full_path: PathBuf,
+    name: String,
+    user: bool,
+}
+
+/// Reads pacman's target list from stdin and converts or removes each unit.
+///
+/// # Errors
+///
+/// Returns an error if stdin cannot be read. Per-unit failures are reported on
+/// stderr and counted as skipped instead.
 pub fn run_hook(config: &Config) -> anyhow::Result<()> {
-    let stdin = io::stdin();
-    let mut converted = 0u32;
+    let lines = io::stdin().lock().lines().collect::<Result<Vec<_>, _>>()?;
+    process_targets(&lines, config);
+    Ok(())
+}
+
+/// Converts or removes the units named in `lines`, one path per line.
+///
+/// Paths may be relative to `/`, as pacman passes them. All lines are read
+/// before anything is converted, so a unit may depend on another unit from the
+/// same transaction even though its dinit service does not exist yet.
+pub fn process_targets(lines: &[String], config: &Config) {
     let mut removed = 0u32;
     let mut skipped = 0u32;
+    let mut targets = Vec::new();
 
-    for line in stdin.lock().lines() {
-        let line = line?;
+    for line in lines {
         let path = PathBuf::from(line.trim());
 
         // Only process .service files
         if path.extension().map(|e| e != "service").unwrap_or(true) {
             continue;
         }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+            continue;
+        };
 
         // Skip template units
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && stem.contains('@')
-        {
+        if name.contains('@') {
             eprintln!("  skip: template unit {}", path.display());
             skipped += 1;
             continue;
         }
 
         // Check ignored list
-        if let Some(name) = path.file_name().and_then(|s| s.to_str())
-            && config.ignored_units.contains(&name.to_string())
+        if let Some(file) = path.file_name().and_then(|s| s.to_str())
+            && config.ignored_units.iter().any(|u| u == file)
         {
             skipped += 1;
             continue;
@@ -83,47 +109,57 @@ pub fn run_hook(config: &Config) -> anyhow::Result<()> {
         } else {
             PathBuf::from("/").join(&path)
         };
+        let user = is_user_unit(&path);
 
-        // Route to the appropriate output directory based on service scope.
-        // User-scope units (usr/lib/systemd/user/) go to user_output_dir so
-        // they are available to all users' dinit sessions. System-scope units
-        // go to output_dir for the root dinit instance.
-        let output_dir = if is_user_unit(&path) {
-            &config.user_output_dir
-        } else {
-            &config.output_dir
-        };
-
-        if !full_path.exists() {
-            // File was removed by pacman — clean up the generated dinit service.
-            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                let dinit_path = output_dir.join(name);
-                if dinit_path.exists() {
-                    let scope = if is_user_unit(&path) {
-                        "user"
-                    } else {
-                        "system"
-                    };
-                    eprintln!("  removing [{}]: {}", scope, name);
-                    remove_unit(name, output_dir);
-                    removed += 1;
-                }
-            }
+        if full_path.exists() {
+            targets.push(Target {
+                full_path,
+                name,
+                user,
+            });
             continue;
         }
 
-        match convert_unit(&full_path, output_dir.as_path(), config) {
+        // File was removed by pacman — clean up the generated dinit service.
+        let output_dir = output_dir_for(config, user);
+        if output_dir.join(&name).exists() {
+            let scope = if user { "user" } else { "system" };
+            eprintln!("  removing [{}]: {}", scope, name);
+            remove_unit(&name, output_dir);
+            removed += 1;
+        }
+    }
+
+    // Scanned after removals, so a unit dropped in this transaction no longer counts.
+    let mut system_dirs = config.service_dirs.clone();
+    system_dirs.push(config.output_dir.clone());
+    let mut user_dirs = config.user_service_dirs.clone();
+    user_dirs.push(config.user_output_dir.clone());
+    let mut known_system = KnownServices::scan(&system_dirs);
+    let mut known_user = KnownServices::scan(&user_dirs);
+    for target in &targets {
+        let known = if target.user {
+            &mut known_user
+        } else {
+            &mut known_system
+        };
+        known.insert(target.name.clone());
+    }
+
+    let mut converted = 0u32;
+    for target in &targets {
+        let (output_dir, known, scope) = if target.user {
+            (&config.user_output_dir, &known_user, "user")
+        } else {
+            (&config.output_dir, &known_system, "system")
+        };
+        match convert_unit(&target.full_path, output_dir, config, known) {
             Ok(name) => {
-                let scope = if is_user_unit(&path) {
-                    "user"
-                } else {
-                    "system"
-                };
                 eprintln!("  converted [{}]: {}", scope, name);
                 converted += 1;
             }
             Err(e) => {
-                eprintln!("  error converting {}: {:#}", path.display(), e);
+                eprintln!("  error converting {}: {:#}", target.full_path.display(), e);
                 skipped += 1;
             }
         }
@@ -133,18 +169,32 @@ pub fn run_hook(config: &Config) -> anyhow::Result<()> {
         "sd2dinit hook: {} converted, {} removed, {} skipped",
         converted, removed, skipped
     );
-    Ok(())
 }
 
-fn convert_unit(path: &Path, output_dir: &Path, config: &Config) -> anyhow::Result<String> {
+/// User-scope units go to `user_output_dir` so every user's dinit sees them;
+/// system units go to `output_dir` for the root instance.
+fn output_dir_for(config: &Config, user: bool) -> &Path {
+    if user {
+        &config.user_output_dir
+    } else {
+        &config.output_dir
+    }
+}
+
+fn convert_unit(
+    path: &Path,
+    output_dir: &Path,
+    config: &Config,
+    known: &KnownServices,
+) -> anyhow::Result<String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?;
 
     let unit = SystemdUnit::parse(&content, path.to_path_buf())
         .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
 
-    let result =
-        converter::convert(&unit, config).map_err(|e| anyhow::anyhow!("convert error: {}", e))?;
+    let result = converter::convert(&unit, config, known)
+        .map_err(|e| anyhow::anyhow!("convert error: {}", e))?;
 
     // Print warnings
     for w in &result.warnings {

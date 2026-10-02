@@ -25,22 +25,45 @@ pub struct Config {
     pub user_output_dir: PathBuf,
 
     pub ignored_units: Vec<String>,
+
+    /// systemd unit name → dinit service name, taking precedence over lookup.
+    ///
+    /// Mapped names are emitted even when no such dinit service exists yet.
     pub dependency_map: HashMap<String, String>,
+
+    /// Directories searched for the dinit services system units may depend on.
+    pub service_dirs: Vec<PathBuf>,
+
+    /// Directories searched for the dinit services user units may depend on.
+    pub user_service_dirs: Vec<PathBuf>,
 }
+
+/// Where the system dinit instance looks for service files, per dinit(8).
+const SYSTEM_SERVICE_DIRS: &[&str] = &[
+    "/etc/dinit.d",
+    "/run/dinit.d",
+    "/usr/local/lib/dinit.d",
+    "/lib/dinit.d",
+];
+
+/// The shared directories a user dinit instance searches, per dinit(8).
+///
+/// Per-user `~/.config/dinit.d` is left out: the pacman hook runs as root.
+const USER_SERVICE_DIRS: &[&str] = &[
+    "/etc/dinit.d/user",
+    "/usr/lib/dinit.d/user",
+    "/usr/local/lib/dinit.d/user",
+];
 
 impl Default for Config {
     fn default() -> Self {
-        let mut dependency_map = HashMap::new();
-        dependency_map.insert("network-online.target".into(), "network".into());
-        dependency_map.insert("network.target".into(), "network".into());
-        dependency_map.insert("multi-user.target".into(), "boot".into());
-        dependency_map.insert("sysinit.target".into(), "boot".into());
-        dependency_map.insert("default.target".into(), "boot".into());
         Self {
             output_dir: PathBuf::from("/etc/dinit.d"),
             user_output_dir: PathBuf::from("/usr/lib/dinit.d/user"),
             ignored_units: Vec::new(),
-            dependency_map,
+            dependency_map: HashMap::new(),
+            service_dirs: SYSTEM_SERVICE_DIRS.iter().map(PathBuf::from).collect(),
+            user_service_dirs: USER_SERVICE_DIRS.iter().map(PathBuf::from).collect(),
         }
     }
 }
@@ -58,16 +81,7 @@ impl Config {
             source: e,
         })?;
 
-        let mut config: Config =
-            toml::from_str(&content).map_err(|e| ConfigError::ParseError { source: e })?;
-
-        // Merge built-in defaults — user entries take precedence
-        let defaults = Self::default();
-        for (k, v) in defaults.dependency_map {
-            config.dependency_map.entry(k).or_insert(v);
-        }
-
-        Ok(config)
+        toml::from_str(&content).map_err(|e| ConfigError::ParseError { source: e })
     }
 }
 

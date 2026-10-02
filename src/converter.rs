@@ -2,14 +2,30 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::ConvertError;
 use crate::model::{ConversionResult, DinitService, DinitType, RestartPolicy, Severity, Warning};
 use crate::parser::SystemdUnit;
+use crate::services::KnownServices;
 
-pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, ConvertError> {
+/// Converts a parsed systemd unit into dinit service descriptions.
+///
+/// Dependencies are only emitted on services in `known` (or mapped through
+/// `config.dependency_map`), because dinit refuses to load a service whose
+/// `depends-on` or `waits-for` names a service it cannot find. Everything that
+/// cannot be expressed in dinit is reported in [`ConversionResult::warnings`].
+///
+/// # Errors
+///
+/// Returns [`ConvertError::NoExecStart`] when the unit has no `ExecStart=`.
+pub fn convert(
+    unit: &SystemdUnit,
+    config: &Config,
+    known: &KnownServices,
+) -> Result<ConversionResult, ConvertError> {
     let mut warnings: Vec<Warning> = Vec::new();
 
     // Derive service name from file path
@@ -30,7 +46,7 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     let has_pid_file = unit.get("Service", "PIDFile").is_some();
 
     let service_type = match raw_type {
-        "simple" => DinitType::Process,
+        "simple" | "exec" | "idle" => DinitType::Process,
         "forking" if has_pid_file => DinitType::BgProcess,
         "forking" => {
             warnings.push(Warning {
@@ -71,17 +87,52 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     // $/VAR word-splitting form. EnvironmentFile= entries are parsed at
     // conversion time and rewritten as a dinit-compatible env-file, so dinit
     // can read them directly without a shell wrapper.
+    let (exec_prefix, exec_cmd) = clean_exec("ExecStart", exec_start, &mut warnings);
+    if exec_prefix.ignore_failure {
+        warnings.push(Warning {
+            directive: "ExecStart".into(),
+            message: "'-' prefix dropped — dinit treats a failing exit as a failure".into(),
+            severity: Severity::Info,
+        });
+    }
     let command = {
-        let cmd = replace_specifiers(exec_start, &name, &mut warnings);
-        convert_env_refs(cmd)
+        let cmd = replace_specifiers(&exec_cmd, &name, &mut warnings);
+        if exec_prefix.no_env_expansion {
+            escape_dollars(&cmd, Quoting::Dinit)
+        } else {
+            convert_env_refs(cmd)
+        }
     };
 
     // Stop command
-    let stop_command = unit.get("Service", "ExecStop").map(|s| s.to_string());
+    let stop_command = unit.get("Service", "ExecStop").map(|raw| {
+        let (prefix, cmd) = clean_exec("ExecStop", raw, &mut warnings);
+        if prefix.no_env_expansion {
+            escape_dollars(&cmd, Quoting::Dinit)
+        } else {
+            cmd
+        }
+    });
 
     // User and Group
     let user = unit.get("Service", "User").map(|s| s.to_string());
-    let group = unit.get("Service", "Group").map(|s| s.to_string());
+    match (user.as_deref(), unit.get("Service", "Group")) {
+        (Some(user), Some(group)) if group != user => warnings.push(Warning {
+            directive: "Group".into(),
+            message: format!(
+                "Group={group} ignored — dinit runs the service with {user}'s primary group"
+            ),
+            severity: Severity::Warn,
+        }),
+        (None, Some(group)) => warnings.push(Warning {
+            directive: "Group".into(),
+            message: format!(
+                "Group={group} without User= ignored — dinit's run-as takes only a user"
+            ),
+            severity: Severity::Warn,
+        }),
+        _ => {}
+    }
 
     // Working directory
     let working_dir = unit.get("Service", "WorkingDirectory").map(PathBuf::from);
@@ -93,9 +144,18 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     let (restart, smooth_recovery) = convert_restart(unit.get("Service", "Restart"), &mut warnings);
 
     // Restart delay
-    let restart_delay = unit.get("Service", "RestartSec").and_then(|s| {
-        let s = s.trim_end_matches('s');
-        s.parse::<f64>().ok()
+    let restart_delay = unit.get("Service", "RestartSec").and_then(|span| {
+        let secs = parse_timespan_secs(span);
+        if secs.is_none() {
+            warnings.push(Warning {
+                directive: "RestartSec".into(),
+                message: format!(
+                    "RestartSec={span} is not a time span sd2dinit understands — dropped"
+                ),
+                severity: Severity::Warn,
+            });
+        }
+        secs
     });
 
     // Environment — parse shell-format EnvironmentFile entries and rewrite them
@@ -103,7 +163,7 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
     let (env_files, env_file_content) = convert_environment(unit, config, &name, &mut warnings);
 
     // Dependencies
-    let (depends_on, depends_ms, waits_for) = convert_dependencies(unit, config, &mut warnings);
+    let deps = convert_dependencies(unit, &name, config, known, &mut warnings);
 
     // ExecStartPre / ExecStartPost
     let (pre_service, pre_script) =
@@ -131,7 +191,7 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
         });
     }
 
-    let mut main_depends_on = depends_on;
+    let mut main_depends_on = deps.depends_on;
     if pre_service.is_some() {
         main_depends_on.push(format!("{}-pre", name));
     }
@@ -143,7 +203,6 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
         command: Some(command),
         stop_command: final_stop_command,
         user,
-        group,
         working_dir,
         env_files,
         pid_file,
@@ -151,8 +210,9 @@ pub fn convert(unit: &SystemdUnit, config: &Config) -> Result<ConversionResult, 
         smooth_recovery,
         restart_delay,
         depends_on: main_depends_on,
-        depends_ms,
-        waits_for,
+        waits_for: deps.waits_for,
+        after: deps.after,
+        before: deps.before,
         logfile: None,
     };
 
@@ -279,10 +339,7 @@ fn convert_environment(
 
     // Inline Environment= directives
     for val in unit.get_all("Service", "Environment") {
-        let val = val.trim_matches('"').trim_matches('\'');
-        if let Some(eq) = val.find('=') {
-            vars.push((val[..eq].to_string(), val[eq + 1..].to_string()));
-        }
+        vars.extend(split_environment(val));
     }
 
     // EnvironmentFile= entries — read and parse shell-format files, rewriting
@@ -331,6 +388,59 @@ fn convert_environment(
         .map(|(k, v)| format!("{}={}\n", k, dinit_quote_value(v)))
         .collect::<String>();
     (vec![env_path], Some(content))
+}
+
+/// Splits an `Environment=` value into its assignments.
+///
+/// systemd allows several space-separated assignments on one line, each
+/// optionally wrapped in double or single quotes, e.g.
+/// `"A=1 2" B=3 'C=x y'`. Words without `=` are ignored, as systemd does.
+fn split_environment(value: &str) -> Vec<(String, String)> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                in_word = true;
+                while let Some(q) = chars.next() {
+                    if q == c {
+                        break;
+                    }
+                    if q == '\\' && c == '"' {
+                        word.extend(chars.next());
+                    } else {
+                        word.push(q);
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                word.extend(chars.next());
+            }
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+        .into_iter()
+        .filter_map(|w| {
+            let (key, val) = w.split_once('=')?;
+            (!key.is_empty()).then(|| (key.to_string(), val.to_string()))
+        })
+        .collect()
 }
 
 /// Parses a shell-format env-file (e.g. `/etc/default/*`) into key-value pairs
@@ -432,56 +542,86 @@ fn dinit_quote_value(value: &str) -> String {
     value.to_string()
 }
 
+/// How a dinit service relates to one of its dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relation {
+    DependsOn,
+    WaitsFor,
+    After,
+    Before,
+}
+
+/// The systemd directives sd2dinit maps, strongest relation first.
+///
+/// Processing them in this order lets the first placement of a name win, so a
+/// service listed under several directives keeps only its strongest relation.
+const DEPENDENCY_DIRECTIVES: [(&str, Relation); 4] = [
+    ("Requires", Relation::DependsOn),
+    ("Wants", Relation::WaitsFor),
+    ("After", Relation::After),
+    ("Before", Relation::Before),
+];
+
+#[derive(Debug, Default)]
+struct Dependencies {
+    depends_on: Vec<String>,
+    waits_for: Vec<String>,
+    after: Vec<String>,
+    before: Vec<String>,
+}
+
 fn convert_dependencies(
     unit: &SystemdUnit,
+    service_name: &str,
     config: &Config,
+    known: &KnownServices,
     warnings: &mut Vec<Warning>,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut depends_on = Vec::new();
-    let mut depends_ms = Vec::new();
-    let mut waits_for = Vec::new();
+) -> Dependencies {
+    let mut deps = Dependencies::default();
+    // Names already placed as depends-on, waits-for or after. The first two
+    // order startup themselves, so a weaker relation on the same name adds nothing.
+    let mut ordered: HashSet<String> = HashSet::new();
 
-    let resolve = |dep: &str| -> String {
-        let dep = dep.trim();
-        if let Some(mapped) = config.dependency_map.get(dep) {
-            return mapped.clone();
+    for (directive, relation) in DEPENDENCY_DIRECTIVES {
+        for dep in unit
+            .get_all("Unit", directive)
+            .into_iter()
+            .flat_map(str::split_whitespace)
+        {
+            let Some(name) = resolve_dependency(dep, config, known) else {
+                warnings.push(Warning {
+                    directive: directive.into(),
+                    message: format!("{dep}: no dinit service of that name — dependency dropped"),
+                    severity: match relation {
+                        Relation::DependsOn | Relation::WaitsFor => Severity::Warn,
+                        Relation::After | Relation::Before => Severity::Info,
+                    },
+                });
+                continue;
+            };
+            if name == service_name {
+                warnings.push(Warning {
+                    directive: directive.into(),
+                    message: format!("{dep} resolves to this service itself — dropped"),
+                    severity: Severity::Info,
+                });
+                continue;
+            }
+            let list = match relation {
+                Relation::DependsOn => &mut deps.depends_on,
+                Relation::WaitsFor => &mut deps.waits_for,
+                Relation::After => &mut deps.after,
+                Relation::Before => &mut deps.before,
+            };
+            let first_placement = if relation == Relation::Before {
+                !ordered.contains(&name) && !list.contains(&name)
+            } else {
+                ordered.insert(name.clone())
+            };
+            if first_placement {
+                list.push(name);
+            }
         }
-        // Strip .service suffix; leave .target, .socket, etc. stripped too
-        let stripped = dep
-            .strip_suffix(".service")
-            .or_else(|| dep.strip_suffix(".target"))
-            .or_else(|| dep.strip_suffix(".socket"))
-            .or_else(|| dep.strip_suffix(".mount"))
-            .or_else(|| dep.strip_suffix(".path"))
-            .or_else(|| dep.strip_suffix(".timer"))
-            .unwrap_or(dep);
-        stripped.to_string()
-    };
-
-    for val in unit.get_all("Unit", "Requires") {
-        for dep in val.split_whitespace() {
-            depends_on.push(resolve(dep));
-        }
-    }
-
-    for val in unit.get_all("Unit", "Wants") {
-        for dep in val.split_whitespace() {
-            depends_ms.push(resolve(dep));
-        }
-    }
-
-    for val in unit.get_all("Unit", "After") {
-        for dep in val.split_whitespace() {
-            waits_for.push(resolve(dep));
-        }
-    }
-
-    if !unit.get_all("Unit", "Before").is_empty() {
-        warnings.push(Warning {
-            directive: "Before".into(),
-            message: "Before= skipped (no direct dinit equivalent)".into(),
-            severity: Severity::Info,
-        });
     }
 
     if !unit.get_all("Unit", "Conflicts").is_empty() {
@@ -492,7 +632,158 @@ fn convert_dependencies(
         });
     }
 
-    (depends_on, depends_ms, waits_for)
+    deps
+}
+
+/// Maps a systemd unit name to the dinit service it should depend on.
+///
+/// `dependency_map` wins outright. Otherwise the exact name (`network.target`)
+/// is preferred over the suffix-stripped one (`network`), and only names that
+/// exist in `known` are returned.
+fn resolve_dependency(dep: &str, config: &Config, known: &KnownServices) -> Option<String> {
+    if let Some(mapped) = config.dependency_map.get(dep) {
+        return Some(mapped.clone());
+    }
+    [dep, strip_unit_suffix(dep)]
+        .into_iter()
+        .find(|name| known.contains(name))
+        .map(str::to_owned)
+}
+
+fn strip_unit_suffix(dep: &str) -> &str {
+    const SUFFIXES: &[&str] = &[
+        ".service", ".target", ".socket", ".mount", ".path", ".timer",
+    ];
+    SUFFIXES
+        .iter()
+        .find_map(|suffix| dep.strip_suffix(suffix))
+        .unwrap_or(dep)
+}
+
+/// systemd's special prefixes on `Exec*=` values.
+#[derive(Debug, Default, Clone, Copy)]
+struct ExecPrefix {
+    /// `-`: a non-zero exit is not a failure.
+    ignore_failure: bool,
+    /// `:`: no `$VAR` expansion.
+    no_env_expansion: bool,
+}
+
+/// Where a cleaned command ends up, which decides how a literal `$` is written.
+#[derive(Debug, Clone, Copy)]
+enum Quoting {
+    /// A dinit `command`, where `$$` is a literal `$`.
+    Dinit,
+    /// A line in a generated `/bin/sh` script, where `\$` is.
+    Shell,
+}
+
+fn escape_dollars(cmd: &str, quoting: Quoting) -> String {
+    match quoting {
+        Quoting::Dinit => cmd.replace('$', "$$"),
+        Quoting::Shell => cmd.replace('$', "\\$"),
+    }
+}
+
+/// Strips systemd's prefixes (`-`, `@`, `:`, `+`, `!`, `!!`) from an `Exec*=` value.
+///
+/// `@` makes the second word argv[0], which dinit cannot set, so that word is
+/// dropped. `+`, `!` and `!!` (run with full privileges) cannot be expressed
+/// either. Both are reported in `warnings`; `$` escaping for `:` is left to the
+/// caller because it depends on where the command is written.
+fn clean_exec(directive: &str, raw: &str, warnings: &mut Vec<Warning>) -> (ExecPrefix, String) {
+    let mut prefix = ExecPrefix::default();
+    let mut argv0 = false;
+    let mut privileged = false;
+    let mut rest = raw.trim();
+    loop {
+        match rest.as_bytes().first() {
+            Some(b'-') => prefix.ignore_failure = true,
+            Some(b':') => prefix.no_env_expansion = true,
+            Some(b'@') => argv0 = true,
+            Some(b'+' | b'!') => privileged = true,
+            _ => break,
+        }
+        rest = &rest[1..];
+    }
+    let rest = rest.trim_start();
+
+    let command = if argv0 {
+        let mut words = rest.split_whitespace();
+        let program = words.next().unwrap_or_default();
+        let dropped = words.next().unwrap_or_default();
+        warnings.push(Warning {
+            directive: directive.into(),
+            message: format!("'@' prefix: dinit cannot set argv[0] — '{dropped}' dropped"),
+            severity: Severity::Warn,
+        });
+        std::iter::once(program)
+            .chain(words)
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        rest.to_string()
+    };
+
+    if privileged {
+        warnings.push(Warning {
+            directive: directive.into(),
+            message: "'+'/'!' prefix (full privileges) not supported — the command runs as the run-as user".into(),
+            severity: Severity::Warn,
+        });
+    }
+
+    (prefix, command)
+}
+
+/// Cleans an `Exec*=` value and applies the `:` prefix for `quoting`.
+fn exec_command(
+    directive: &str,
+    raw: &str,
+    quoting: Quoting,
+    warnings: &mut Vec<Warning>,
+) -> (bool, String) {
+    let (prefix, cmd) = clean_exec(directive, raw, warnings);
+    let cmd = if prefix.no_env_expansion {
+        escape_dollars(&cmd, quoting)
+    } else {
+        cmd
+    };
+    (prefix.ignore_failure, cmd)
+}
+
+/// Parses a systemd time span such as `3`, `500ms` or `1min 30s` into seconds.
+///
+/// A bare number is seconds, as in systemd. Returns `None` for anything else,
+/// including `infinity`, which dinit's `restart-delay` cannot express.
+fn parse_timespan_secs(span: &str) -> Option<f64> {
+    let mut rest = span.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total = 0.0;
+    while !rest.is_empty() {
+        let num_len = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let value: f64 = rest[..num_len].parse().ok()?;
+        rest = rest[num_len..].trim_start();
+        let unit_len = rest
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
+        // Sub-second units divide rather than multiply so 500ms is exactly 0.5.
+        let (mul, div) = match &rest[..unit_len] {
+            "" | "s" | "sec" | "second" | "seconds" => (1.0, 1.0),
+            "ms" | "msec" => (1.0, 1_000.0),
+            "us" | "usec" => (1.0, 1_000_000.0),
+            "m" | "min" | "minute" | "minutes" => (60.0, 1.0),
+            "h" | "hr" | "hour" | "hours" => (3_600.0, 1.0),
+            _ => return None,
+        };
+        total += value * mul / div;
+        rest = rest[unit_len..].trim_start();
+    }
+    Some(total)
 }
 
 fn build_script_command(config: &Config, service_name: &str, suffix: &str) -> String {
@@ -509,40 +800,21 @@ fn convert_exec_pre(
     service_name: &str,
     source_path: &Path,
     config: &Config,
-    _warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Warning>,
 ) -> (Option<DinitService>, Option<String>) {
     let pre_cmds = unit.get_all("Service", "ExecStartPre");
     if pre_cmds.is_empty() {
         return (None, None);
     }
 
-    let (command, script) = if pre_cmds.len() == 1 {
-        let cmd = pre_cmds[0];
-        let (is_dash, clean_cmd) = parse_dash_prefix(cmd);
-        if is_dash {
-            let script_content = format!("#!/bin/sh\nset -e\n{} || true\n", clean_cmd);
-            (
-                build_script_command(config, service_name, "pre"),
-                Some(script_content),
-            )
-        } else {
-            (clean_cmd.to_string(), None)
-        }
-    } else {
-        let mut script = String::from("#!/bin/sh\nset -e\n");
-        for cmd in &pre_cmds {
-            let (is_dash, clean_cmd) = parse_dash_prefix(cmd);
-            if is_dash {
-                script.push_str(&format!("{} || true\n", clean_cmd));
-            } else {
-                script.push_str(&format!("{}\n", clean_cmd));
-            }
-        }
-        (
-            build_script_command(config, service_name, "pre"),
-            Some(script),
-        )
-    };
+    let (command, script) = exec_hook_command(
+        "ExecStartPre",
+        &pre_cmds,
+        config,
+        service_name,
+        "pre",
+        warnings,
+    );
 
     let pre_service = DinitService {
         name: format!("{}-pre", service_name),
@@ -551,7 +823,6 @@ fn convert_exec_pre(
         command: Some(command),
         stop_command: None,
         user: unit.get("Service", "User").map(|s| s.to_string()),
-        group: unit.get("Service", "Group").map(|s| s.to_string()),
         working_dir: unit.get("Service", "WorkingDirectory").map(PathBuf::from),
         env_files: Vec::new(),
         pid_file: None,
@@ -559,8 +830,9 @@ fn convert_exec_pre(
         smooth_recovery: false,
         restart_delay: None,
         depends_on: Vec::new(),
-        depends_ms: Vec::new(),
         waits_for: Vec::new(),
+        after: Vec::new(),
+        before: Vec::new(),
         logfile: None,
     };
 
@@ -572,40 +844,21 @@ fn convert_exec_post(
     service_name: &str,
     source_path: &Path,
     config: &Config,
-    _warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Warning>,
 ) -> (Option<DinitService>, Option<String>) {
     let post_cmds = unit.get_all("Service", "ExecStartPost");
     if post_cmds.is_empty() {
         return (None, None);
     }
 
-    let (command, script) = if post_cmds.len() == 1 {
-        let cmd = post_cmds[0];
-        let (is_dash, clean_cmd) = parse_dash_prefix(cmd);
-        if is_dash {
-            let script_content = format!("#!/bin/sh\nset -e\n{} || true\n", clean_cmd);
-            (
-                build_script_command(config, service_name, "post"),
-                Some(script_content),
-            )
-        } else {
-            (clean_cmd.to_string(), None)
-        }
-    } else {
-        let mut script = String::from("#!/bin/sh\nset -e\n");
-        for cmd in &post_cmds {
-            let (is_dash, clean_cmd) = parse_dash_prefix(cmd);
-            if is_dash {
-                script.push_str(&format!("{} || true\n", clean_cmd));
-            } else {
-                script.push_str(&format!("{}\n", clean_cmd));
-            }
-        }
-        (
-            build_script_command(config, service_name, "post"),
-            Some(script),
-        )
-    };
+    let (command, script) = exec_hook_command(
+        "ExecStartPost",
+        &post_cmds,
+        config,
+        service_name,
+        "post",
+        warnings,
+    );
 
     let post_service = DinitService {
         name: format!("{}-post", service_name),
@@ -614,7 +867,6 @@ fn convert_exec_post(
         command: Some(command),
         stop_command: None,
         user: unit.get("Service", "User").map(|s| s.to_string()),
-        group: unit.get("Service", "Group").map(|s| s.to_string()),
         working_dir: unit.get("Service", "WorkingDirectory").map(PathBuf::from),
         env_files: Vec::new(),
         pid_file: None,
@@ -622,8 +874,9 @@ fn convert_exec_post(
         smooth_recovery: false,
         restart_delay: None,
         depends_on: Vec::new(),
-        depends_ms: Vec::new(),
         waits_for: vec![service_name.to_string()],
+        after: Vec::new(),
+        before: Vec::new(),
         logfile: None,
     };
 
@@ -646,12 +899,13 @@ fn convert_stop_post(
         Some(stop_cmd) => {
             let mut script = String::from("#!/bin/sh\nset -e\n");
             script.push_str(&format!("{}\n", stop_cmd));
-            for cmd in &stop_post_cmds {
-                let (is_dash, clean_cmd) = parse_dash_prefix(cmd);
-                if is_dash {
-                    script.push_str(&format!("{} || true\n", clean_cmd));
+            for raw in &stop_post_cmds {
+                let (ignore_failure, cmd) =
+                    exec_command("ExecStopPost", raw, Quoting::Shell, warnings);
+                if ignore_failure {
+                    script.push_str(&format!("{} || true\n", cmd));
                 } else {
-                    script.push_str(&format!("{}\n", clean_cmd));
+                    script.push_str(&format!("{}\n", cmd));
                 }
             }
             let wrapper_cmd = build_script_command(config, service_name, "stop");
@@ -797,11 +1051,49 @@ fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {
     }
 }
 
-fn parse_dash_prefix(cmd: &str) -> (bool, &str) {
-    let cmd = cmd.trim();
-    if let Some(rest) = cmd.strip_prefix('-') {
-        (true, rest.trim())
-    } else {
-        (false, cmd)
+/// Builds the command for a service's `ExecStartPre=` or `ExecStartPost=` lines.
+///
+/// A single line that must succeed runs directly as the dinit command; anything
+/// else becomes a `/bin/sh` script in which `-` lines may fail.
+fn exec_hook_command(
+    directive: &str,
+    cmds: &[&str],
+    config: &Config,
+    service_name: &str,
+    suffix: &str,
+    warnings: &mut Vec<Warning>,
+) -> (String, Option<String>) {
+    let cleaned: Vec<(ExecPrefix, String)> = cmds
+        .iter()
+        .map(|raw| clean_exec(directive, raw, warnings))
+        .collect();
+
+    if let [(prefix, cmd)] = cleaned.as_slice()
+        && !prefix.ignore_failure
+    {
+        let cmd = if prefix.no_env_expansion {
+            escape_dollars(cmd, Quoting::Dinit)
+        } else {
+            cmd.clone()
+        };
+        return (cmd, None);
     }
+
+    let mut script = String::from("#!/bin/sh\nset -e\n");
+    for (prefix, cmd) in &cleaned {
+        let cmd = if prefix.no_env_expansion {
+            escape_dollars(cmd, Quoting::Shell)
+        } else {
+            cmd.clone()
+        };
+        if prefix.ignore_failure {
+            script.push_str(&format!("{} || true\n", cmd));
+        } else {
+            script.push_str(&format!("{}\n", cmd));
+        }
+    }
+    (
+        build_script_command(config, service_name, suffix),
+        Some(script),
+    )
 }

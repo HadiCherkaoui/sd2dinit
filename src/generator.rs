@@ -32,11 +32,8 @@ pub fn generate(service: &DinitService) -> String {
     }
 
     // Run-as
-    match (&service.user, &service.group) {
-        (Some(u), Some(g)) => out.push_str(&format!("run-as = {}:{}\n", u, g)),
-        (Some(u), None) => out.push_str(&format!("run-as = {}\n", u)),
-        (None, Some(g)) => out.push_str(&format!("run-as = :{}\n", g)),
-        (None, None) => {}
+    if let Some(ref user) = service.user {
+        out.push_str(&format!("run-as = {}\n", user));
     }
 
     // Working directory
@@ -60,8 +57,9 @@ pub fn generate(service: &DinitService) -> String {
     }
 
     // Restart
+    // dinit restarts by default, so systemd's default of no restart must be explicit
     match service.restart {
-        RestartPolicy::Never => {} // default, omit
+        RestartPolicy::Never => out.push_str("restart = false\n"),
         RestartPolicy::Always => out.push_str("restart = true\n"),
         RestartPolicy::OnFailure => out.push_str("restart = on-failure\n"),
     }
@@ -84,11 +82,14 @@ pub fn generate(service: &DinitService) -> String {
     for dep in &service.depends_on {
         out.push_str(&format!("depends-on = {}\n", dep));
     }
-    for dep in &service.depends_ms {
-        out.push_str(&format!("depends-ms = {}\n", dep));
-    }
     for dep in &service.waits_for {
         out.push_str(&format!("waits-for = {}\n", dep));
+    }
+    for dep in &service.after {
+        out.push_str(&format!("after = {}\n", dep));
+    }
+    for dep in &service.before {
+        out.push_str(&format!("before = {}\n", dep));
     }
 
     out

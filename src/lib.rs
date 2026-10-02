@@ -9,3 +9,4 @@ pub mod generator;
 pub mod hook;
 pub mod model;
 pub mod parser;
+pub mod services;

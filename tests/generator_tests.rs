@@ -14,7 +14,6 @@ fn minimal_service() -> DinitService {
         command: Some("/usr/bin/test-daemon".into()),
         stop_command: None,
         user: None,
-        group: None,
         working_dir: None,
         env_files: Vec::new(),
         pid_file: None,
@@ -22,8 +21,9 @@ fn minimal_service() -> DinitService {
         smooth_recovery: false,
         restart_delay: None,
         depends_on: Vec::new(),
-        depends_ms: Vec::new(),
         waits_for: Vec::new(),
+        after: Vec::new(),
+        before: Vec::new(),
         logfile: None,
     }
 }
@@ -49,11 +49,11 @@ fn test_generate_minimal_service() {
 }
 
 #[test]
-fn test_generate_restart_false_omitted() {
+fn test_generate_restart_never_is_explicit() {
     let svc = minimal_service();
     let output = generate(&svc);
-    // restart = false is the default in dinit, so we don't emit it
-    assert!(!output.contains("restart"));
+    // dinit restarts by default, so "never" has to be written out
+    assert!(output.contains("restart = false\n"));
     assert!(!output.contains("smooth-recovery"));
 }
 
@@ -81,28 +81,11 @@ fn test_generate_restart_on_failure() {
 }
 
 #[test]
-fn test_generate_run_as_user_and_group() {
-    let mut svc = minimal_service();
-    svc.user = Some("www-data".into());
-    svc.group = Some("www-data".into());
-    let output = generate(&svc);
-    assert!(output.contains("run-as = www-data:www-data\n"));
-}
-
-#[test]
 fn test_generate_run_as_user_only() {
     let mut svc = minimal_service();
     svc.user = Some("nobody".into());
     let output = generate(&svc);
     assert!(output.contains("run-as = nobody\n"));
-}
-
-#[test]
-fn test_generate_run_as_group_only() {
-    let mut svc = minimal_service();
-    svc.group = Some("daemon".into());
-    let output = generate(&svc);
-    assert!(output.contains("run-as = :daemon\n"));
 }
 
 #[test]
@@ -118,14 +101,17 @@ fn test_generate_bgprocess_with_pid_file() {
 #[test]
 fn test_generate_dependencies() {
     let mut svc = minimal_service();
-    svc.depends_on = vec!["network".into(), "sshd-pre".into()];
-    svc.depends_ms = vec!["dbus".into()];
-    svc.waits_for = vec!["local-fs".into()];
+    svc.depends_on = vec!["dbus".into(), "sshd-pre".into()];
+    svc.waits_for = vec!["network-online.target".into()];
+    svc.after = vec!["network.target".into()];
+    svc.before = vec!["display-manager".into()];
     let output = generate(&svc);
-    assert!(output.contains("depends-on = network\n"));
+    assert!(output.contains("depends-on = dbus\n"));
     assert!(output.contains("depends-on = sshd-pre\n"));
-    assert!(output.contains("depends-ms = dbus\n"));
-    assert!(output.contains("waits-for = local-fs\n"));
+    assert!(output.contains("waits-for = network-online.target\n"));
+    assert!(output.contains("after = network.target\n"));
+    assert!(output.contains("before = display-manager\n"));
+    assert!(!output.contains("depends-ms"));
 }
 
 #[test]
@@ -149,7 +135,6 @@ fn test_generate_full_service() {
         command: Some("/usr/bin/sshd -D".into()),
         stop_command: Some("/bin/kill -QUIT $PID".into()),
         user: Some("root".into()),
-        group: None,
         working_dir: Some(PathBuf::from("/var/run/sshd")),
         env_files: vec![PathBuf::from("/etc/dinit.d/sshd.env")],
         pid_file: None,
@@ -157,8 +142,9 @@ fn test_generate_full_service() {
         smooth_recovery: true,
         restart_delay: Some(2.5),
         depends_on: vec!["network".into()],
-        depends_ms: Vec::new(),
         waits_for: vec!["sshd-pre".into()],
+        after: Vec::new(),
+        before: Vec::new(),
         logfile: Some(PathBuf::from("/var/log/sshd.log")),
     };
     let output = generate(&svc);

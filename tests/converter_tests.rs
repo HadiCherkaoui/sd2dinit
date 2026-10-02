@@ -6,6 +6,7 @@ use sd2dinit::config::Config;
 use sd2dinit::converter::convert;
 use sd2dinit::model::{DinitType, RestartPolicy};
 use sd2dinit::parser::SystemdUnit;
+use sd2dinit::services::KnownServices;
 use std::path::PathBuf;
 
 fn parse(input: &str) -> SystemdUnit {
@@ -14,6 +15,17 @@ fn parse(input: &str) -> SystemdUnit {
 
 fn default_config() -> Config {
     Config::default()
+}
+
+fn known() -> KnownServices {
+    [
+        "network.target",
+        "network-online.target",
+        "docker",
+        "syslog",
+    ]
+    .into_iter()
+    .collect()
 }
 
 #[test]
@@ -25,7 +37,7 @@ Type=simple
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.service_type, DinitType::Process);
     assert_eq!(result.main_service.command, Some("/usr/bin/daemon".into()));
 }
@@ -38,7 +50,7 @@ fn test_convert_default_type_is_simple() {
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.service_type, DinitType::Process);
 }
 
@@ -52,7 +64,7 @@ PIDFile=/run/nginx.pid
 ExecStart=/usr/bin/nginx
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.service_type, DinitType::BgProcess);
     assert_eq!(
         result.main_service.pid_file,
@@ -69,7 +81,7 @@ Type=forking
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.service_type, DinitType::Process);
     assert!(
         result
@@ -88,7 +100,7 @@ Type=oneshot
 ExecStart=/usr/bin/setup
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.service_type, DinitType::Scripted);
 }
 
@@ -102,7 +114,7 @@ BusName=org.freedesktop.NetworkManager
 ExecStart=/usr/bin/NetworkManager
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.service_type, DinitType::Process);
     assert!(
         result
@@ -121,7 +133,7 @@ Type=notify
 ExecStart=/usr/bin/dockerd
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.service_type, DinitType::Process);
     assert!(
         result
@@ -141,9 +153,9 @@ User=www-data
 Group=www-data
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.user, Some("www-data".into()));
-    assert_eq!(result.main_service.group, Some("www-data".into()));
+    assert!(!result.warnings.iter().any(|w| w.directive == "Group"));
 }
 
 #[test]
@@ -155,7 +167,7 @@ ExecStart=/usr/bin/daemon
 WorkingDirectory=/var/lib/app
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(
         result.main_service.working_dir,
         Some(PathBuf::from("/var/lib/app"))
@@ -170,7 +182,7 @@ fn test_convert_no_execstart_errors() {
 Type=simple
 ",
     );
-    let result = convert(&unit, &default_config());
+    let result = convert(&unit, &default_config(), &known());
     assert!(result.is_err());
 }
 
@@ -181,7 +193,7 @@ fn test_convert_service_name_from_path() {
         PathBuf::from("/usr/lib/systemd/system/my-app.service"),
     )
     .unwrap();
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.name, "my-app");
 }
 
@@ -195,7 +207,7 @@ PIDFile=/run/sshd.pid
 ExecStart=/usr/sbin/sshd
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(
         result.main_service.pid_file,
         Some(PathBuf::from("/run/sshd.pid"))
@@ -214,7 +226,7 @@ Restart=always
 RestartSec=5
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.restart, RestartPolicy::Always);
     assert!(result.main_service.smooth_recovery);
     assert_eq!(result.main_service.restart_delay, Some(5.0));
@@ -229,7 +241,7 @@ ExecStart=/usr/bin/daemon
 Restart=on-failure
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.restart, RestartPolicy::OnFailure);
     assert!(result.main_service.smooth_recovery);
 }
@@ -243,7 +255,7 @@ ExecStart=/usr/bin/daemon
 Restart=on-success
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.restart, RestartPolicy::Always);
     assert!(
         result
@@ -262,7 +274,7 @@ ExecStart=/usr/bin/daemon
 Restart=no
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.restart, RestartPolicy::Never);
     assert!(!result.main_service.smooth_recovery);
 }
@@ -277,7 +289,7 @@ Restart=always
 RestartSec=60s
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(result.main_service.restart_delay, Some(60.0));
 }
 
@@ -294,7 +306,7 @@ Requires=docker.socket
 ExecStart=/usr/bin/dockerd
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(
         result
             .main_service
@@ -304,7 +316,7 @@ ExecStart=/usr/bin/dockerd
 }
 
 #[test]
-fn test_convert_wants_to_depends_ms() {
+fn test_convert_wants_to_waits_for() {
     let unit = parse(
         "\
 [Unit]
@@ -314,17 +326,15 @@ Wants=network-online.target
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
-    assert!(
-        result
-            .main_service
-            .depends_ms
-            .contains(&"network".to_string())
+    let result = convert(&unit, &default_config(), &known()).unwrap();
+    assert_eq!(
+        result.main_service.waits_for,
+        vec!["network-online.target".to_string()]
     );
 }
 
 #[test]
-fn test_convert_after_to_waits_for() {
+fn test_convert_after_is_ordering_only() {
     let unit = parse(
         "\
 [Unit]
@@ -334,34 +344,12 @@ After=network.target syslog.service
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
-    assert!(
-        result
-            .main_service
-            .waits_for
-            .contains(&"network".to_string())
+    let result = convert(&unit, &default_config(), &known()).unwrap();
+    assert_eq!(
+        result.main_service.after,
+        vec!["network.target".to_string(), "syslog".to_string()]
     );
-    assert!(
-        result
-            .main_service
-            .waits_for
-            .contains(&"syslog".to_string())
-    );
-}
-
-#[test]
-fn test_convert_before_skipped_with_note() {
-    let unit = parse(
-        "\
-[Unit]
-Before=multi-user.target
-
-[Service]
-ExecStart=/usr/bin/daemon
-",
-    );
-    let result = convert(&unit, &default_config()).unwrap();
-    assert!(result.warnings.iter().any(|w| w.directive == "Before"));
+    assert!(result.main_service.waits_for.is_empty());
 }
 
 #[test]
@@ -375,7 +363,7 @@ Conflicts=iptables.service
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.warnings.iter().any(|w| w.directive == "Conflicts"));
 }
 
@@ -394,13 +382,8 @@ After=custom.target
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &config).unwrap();
-    assert!(
-        result
-            .main_service
-            .waits_for
-            .contains(&"my-custom".to_string())
-    );
+    let result = convert(&unit, &config, &known()).unwrap();
+    assert_eq!(result.main_service.after, vec!["my-custom".to_string()]);
 }
 
 // --- Task 7: Environment tests ---
@@ -415,7 +398,7 @@ Environment=FOO=bar
 Environment=\"BAZ=qux\"
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.env_file_content.is_some());
     let content = result.env_file_content.unwrap();
     // Values are single-quoted in the generated dinit env-file
@@ -440,7 +423,7 @@ ExecStart=/usr/bin/daemon
 EnvironmentFile=/nonexistent/path/myapp.env
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.main_service.env_files.is_empty());
     assert!(
         result
@@ -460,7 +443,7 @@ ExecStart=/usr/bin/daemon
 EnvironmentFile=-/nonexistent/path/myapp.env
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.main_service.env_files.is_empty());
     assert!(
         result
@@ -486,7 +469,7 @@ fn test_convert_environment_file_parsed() {
     )
     .unwrap();
 
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
     assert!(result.env_file_content.is_some());
@@ -514,7 +497,7 @@ Environment=KEY=val
 EnvironmentFile=-/nonexistent/path/myapp.env
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     // Only one env-file (the generated one from inline vars; the EnvironmentFile
     // was skipped because it does not exist)
     assert_eq!(result.main_service.env_files.len(), 1);
@@ -539,7 +522,7 @@ ExecStartPre=/usr/bin/setup
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.pre_service.is_some());
     let pre = result.pre_service.unwrap();
     assert_eq!(pre.name, "test-pre");
@@ -563,7 +546,7 @@ ExecStartPre=-/usr/bin/optional-setup
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.pre_service.is_some());
     assert!(result.pre_script.is_some());
     let script = result.pre_script.unwrap();
@@ -583,7 +566,7 @@ ExecStartPre=/usr/bin/also-must-succeed
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.pre_script.is_some());
     let script = result.pre_script.unwrap();
     assert!(script.contains("/usr/bin/must-succeed\n"));
@@ -606,7 +589,7 @@ ExecStart=/usr/bin/daemon
 ExecStartPost=/usr/bin/notify-ready
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.post_service.is_some());
     let post = result.post_service.unwrap();
     assert_eq!(post.name, "test-post");
@@ -623,7 +606,7 @@ ExecStop=/usr/bin/graceful-stop
 ExecStopPost=/usr/bin/cleanup
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.stop_script.is_some());
     let script = result.stop_script.unwrap();
     assert!(script.contains("/usr/bin/graceful-stop"));
@@ -647,7 +630,7 @@ ExecStart=/usr/bin/daemon
 ExecStopPost=/usr/bin/cleanup
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.stop_script.is_none());
     assert!(result.main_service.stop_command.is_none());
     assert!(
@@ -671,7 +654,7 @@ PrivateTmp=true
 NoNewPrivileges=true
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(
         result
             .warnings
@@ -698,7 +681,7 @@ ExecStart=/usr/bin/daemon
 WantedBy=multi-user.target
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.should_enable);
 }
 
@@ -710,7 +693,7 @@ fn test_convert_should_not_enable_without_install() {
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(!result.should_enable);
 }
 
@@ -723,7 +706,7 @@ ExecStart=/usr/bin/daemon
 ExecStop=/usr/bin/graceful-stop
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert_eq!(
         result.main_service.stop_command,
         Some("/usr/bin/graceful-stop".into())
@@ -742,7 +725,7 @@ ExecStart=/usr/bin/daemon
 RequiredBy=multi-user.target
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(result.should_enable);
 }
 
@@ -753,7 +736,7 @@ fn test_convert_specifier_replacement() {
         PathBuf::from("/usr/lib/systemd/system/myapp.service"),
     )
     .unwrap();
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     let cmd = result.main_service.command.unwrap();
     assert!(
         cmd.contains("--name=myapp"),
@@ -779,7 +762,7 @@ ConditionPathExists=/etc/myapp.conf
 ExecStart=/usr/bin/daemon
 ",
     );
-    let result = convert(&unit, &default_config()).unwrap();
+    let result = convert(&unit, &default_config(), &known()).unwrap();
     assert!(
         result
             .warnings

@@ -16,7 +16,7 @@ Built for [Artix Linux](https://artixlinux.org/) and any other dinit-based distr
 
 - Converts systemd `.service` files to dinit service format
 - Maps service types: `simple → process`, `forking → bgprocess`, `oneshot → scripted`
-- Resolves dependencies: `Requires→depends-on`, `Wants→depends-ms`, `After→waits-for`
+- Resolves dependencies: `Requires→depends-on`, `Wants→waits-for`, `After→after`, `Before→before`, only onto dinit services that exist
 - Handles `ExecStartPre`/`ExecStartPost` as separate dinit services with wrapper scripts
 - Generates `.env` files from inline `Environment=` directives
 - Merges drop-in overrides (`.d/` directories) automatically
@@ -158,24 +158,30 @@ ignored_units = [
     "systemd-journal-flush.service",
 ]
 
+# Where dinit services that dependencies may point at are looked up
+# (defaults: dinit's own search path, see dinit(8))
+service_dirs = ["/etc/dinit.d", "/run/dinit.d", "/usr/local/lib/dinit.d", "/lib/dinit.d"]
+user_service_dirs = ["/etc/dinit.d/user", "/usr/lib/dinit.d/user", "/usr/local/lib/dinit.d/user"]
+
 # Custom systemd dependency name → dinit service name mappings
-# These augment the built-in defaults (see below)
 [dependency_map]
-"NetworkManager.service" = "NetworkManager"
-"dbus.service" = "dbus"
+"display-manager.service" = "sddm"
 ```
 
-### Built-in dependency mappings
+### How dependencies are resolved
 
-| systemd name | dinit name |
-|---|---|
-| `network-online.target` | `network` |
-| `network.target` | `network` |
-| `multi-user.target` | `boot` |
-| `sysinit.target` | `boot` |
-| `default.target` | `boot` |
+dinit refuses to load a service whose `depends-on` or `waits-for` names a
+service it cannot find, so each systemd dependency is matched against the
+services that actually exist in `service_dirs` (or `user_service_dirs` for user
+units), plus the units converted in the same pacman transaction:
 
-User-defined entries in `config.toml` override these defaults.
+1. an entry in `dependency_map`, used as-is even if no such service exists yet;
+2. the exact name, e.g. `network.target` (Artix ships it);
+3. the name without its unit suffix, e.g. `dbus.service` → `dbus`.
+
+If none matches, the dependency is dropped with a warning. A dependency that
+resolves to the unit itself (`docker.service` → `Requires=docker.socket`) is
+dropped too.
 
 ---
 
@@ -206,7 +212,7 @@ To skip conversion for specific units, add them to `ignored_units` in your confi
 
 | systemd `Type=` | dinit `type` | Notes |
 |---|---|---|
-| `simple` (default) | `process` | |
+| `simple` (default), `exec`, `idle` | `process` | |
 | `forking` + `PIDFile=` | `bgprocess` | |
 | `forking` (no PIDFile) | `process` | Warning emitted, falls back |
 | `oneshot` | `scripted` | |
@@ -218,19 +224,43 @@ To skip conversion for specific units, add them to `ignored_units` in your confi
 | systemd | dinit |
 |---|---|
 | `Requires=` | `depends-on` |
-| `Wants=` | `depends-ms` |
-| `After=` | `waits-for` |
-| `Before=` | skipped (no equivalent) |
+| `Wants=` | `waits-for` (starts it, but its failure does not block this service) |
+| `After=` | `after` (ordering only, never starts it) |
+| `Before=` | `before` |
 | `Conflicts=` | skipped (no equivalent) |
+
+A service named under several directives keeps only the strongest relation
+(`depends-on` > `waits-for` > `after`).
+
+### User and Group
+
+dinit's `run-as` takes a user only and always uses that user's primary group,
+so `User=` becomes `run-as`. A `Group=` that differs from the user, or a
+`Group=` without `User=`, is reported and dropped.
 
 ### Restart
 
 | systemd `Restart=` | dinit `restart` |
 |---|---|
-| `no` | (omitted) |
+| `no` (default) | `false` (written out: dinit's own default is to restart) |
 | `always` | `true` |
 | `on-success` | `true` (lossy — warning emitted) |
 | `on-failure` / `on-abnormal` / `on-abort` | `on-failure` |
+
+`RestartSec=` accepts systemd time spans (`3`, `500ms`, `1min 30s`) and becomes
+`restart-delay` in seconds.
+
+### Exec prefixes
+
+systemd's special prefixes on `ExecStart=`, `ExecStop=`, `ExecStartPre=`,
+`ExecStartPost=` and `ExecStopPost=` are stripped from the command:
+
+| Prefix | Handling |
+|---|---|
+| `-` | pre/post/stop-post scripts get `\|\| true`; on `ExecStart=` it is reported and dropped |
+| `:` | `$` is escaped so no variable is substituted |
+| `@` | dinit cannot set argv[0]; the argv[0] word is dropped with a warning |
+| `+`, `!`, `!!` | full-privilege execution is not supported; warning emitted |
 
 ### Out of scope (warnings emitted, directives skipped)
 
