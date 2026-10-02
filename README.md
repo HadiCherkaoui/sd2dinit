@@ -19,7 +19,7 @@ Built for [Artix Linux](https://artixlinux.org/) and any other dinit-based distr
 - Resolves dependencies: `Requires→depends-on`, `Wants→waits-for`, `After→after`, `Before→before`, only onto dinit services that exist
 - Handles `ExecStartPre`/`ExecStartPost` as separate dinit services with wrapper scripts
 - Generates `.env` files from inline `Environment=` directives
-- Merges drop-in overrides (`.d/` directories) automatically
+- Merges drop-in overrides (`.d/` directories) automatically, in the CLI and the hook
 - Warns about unsupported directives (sandboxing, cgroup, socket activation) without failing
 - `--dry-run` mode to preview output without writing any files
 - Pacman hook for automatic conversion on package install/upgrade
@@ -45,7 +45,7 @@ curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install
 Pin a specific version:
 
 ```sh
-curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install.sh | sh -s -- --version v0.1.0
+curl -fsSL https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit/-/raw/main/install.sh | sh -s -- --version v0.2.0
 ```
 
 ### Via cargo
@@ -75,7 +75,7 @@ doas install -Dm644 hooks/sd2dinit.hook /usr/share/libalpm/hooks/sd2dinit.hook
 
 ### Build from source
 
-Requires Rust 1.70+.
+Requires a Rust toolchain that supports edition 2024.
 
 ```sh
 git clone https://gitlab.cherkaoui.ch/HadiCherkaoui/sd2dinit.git
@@ -152,6 +152,9 @@ Create `~/.config/sd2dinit/config.toml`:
 # Where to write generated dinit service files (default: /etc/dinit.d)
 output_dir = "/etc/dinit.d"
 
+# Where units from usr/lib/systemd/user go (default: /usr/lib/dinit.d/user)
+user_output_dir = "/usr/lib/dinit.d/user"
+
 # Unit filenames to never convert
 ignored_units = [
     "systemd-tmpfiles-setup.service",
@@ -173,7 +176,9 @@ user_service_dirs = ["/etc/dinit.d/user", "/usr/lib/dinit.d/user", "/usr/local/l
 dinit refuses to load a service whose `depends-on` or `waits-for` names a
 service it cannot find, so each systemd dependency is matched against the
 services that actually exist in `service_dirs` (or `user_service_dirs` for user
-units), plus the units converted in the same pacman transaction:
+units) and the output directory, plus the units that convert in the same pacman
+transaction. `sd2dinit convert` run on a user unit also looks in your own
+`$XDG_CONFIG_HOME/dinit.d` and `~/.config/dinit.d`, as your dinit instance does:
 
 1. an entry in `dependency_map`, used as-is even if no such service exists yet;
 2. the exact name, e.g. `network.target` (Artix ships it);
@@ -230,13 +235,18 @@ To skip conversion for specific units, add them to `ignored_units` in your confi
 | `Conflicts=` | skipped (no equivalent) |
 
 A service named under several directives keeps only the strongest relation
-(`depends-on` > `waits-for` > `after`).
+(`depends-on` > `waits-for` > `after`). `Before=` beats all of them: dinit
+rejects `before` plus a pull-in of the same service as a cycle, so the pull-in is
+dropped with a warning.
 
 ### User and Group
 
 dinit's `run-as` takes a user only and always uses that user's primary group,
 so `User=` becomes `run-as`. A `Group=` that differs from the user, or a
 `Group=` without `User=`, is reported and dropped.
+
+A numeric `User=` is kept but warned about: given a UID, dinit keeps its own
+group (root) and drops supplementary groups. Use the user name instead.
 
 ### Restart
 
@@ -247,8 +257,8 @@ so `User=` becomes `run-as`. A `Group=` that differs from the user, or a
 | `on-success` | `true` (lossy — warning emitted) |
 | `on-failure` / `on-abnormal` / `on-abort` | `on-failure` |
 
-`RestartSec=` accepts systemd time spans (`3`, `500ms`, `1min 30s`) and becomes
-`restart-delay` in seconds.
+`RestartSec=` accepts systemd time spans (`3`, `500ms`, `1min 30s`, `2d`, from
+`ns` up to `y`) and becomes `restart-delay` in seconds.
 
 ### Exec prefixes
 
@@ -257,9 +267,10 @@ systemd's special prefixes on `ExecStart=`, `ExecStop=`, `ExecStartPre=`,
 
 | Prefix | Handling |
 |---|---|
-| `-` | pre/post/stop-post scripts get `\|\| true`; on `ExecStart=` it is reported and dropped |
+| `-` | lines in generated scripts get `\|\| true`; on `ExecStart=`, or `ExecStop=` without `ExecStopPost=`, it is reported and dropped |
 | `:` | `$` is escaped so no variable is substituted |
 | `@` | dinit cannot set argv[0]; the argv[0] word is dropped with a warning |
+| prefix only, no command | `ExecStart=` is treated as missing and the unit is not converted |
 | `+`, `!`, `!!` | full-privilege execution is not supported; warning emitted |
 
 ### Out of scope (warnings emitted, directives skipped)

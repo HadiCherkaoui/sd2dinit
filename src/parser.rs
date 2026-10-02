@@ -4,7 +4,7 @@
 
 use crate::error::ParseError;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct SystemdUnit {
@@ -15,6 +15,37 @@ pub struct SystemdUnit {
 }
 
 impl SystemdUnit {
+    /// Reads the unit at `path` and merges its `<unit>.d/*.conf` drop-ins in name order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError::IoError`] when the unit or a drop-in cannot be read,
+    /// and [`ParseError::NoSections`] when the unit has no sections.
+    pub fn load(path: &Path) -> Result<Self, ParseError> {
+        let read = |path: &Path| {
+            std::fs::read_to_string(path).map_err(|source| ParseError::IoError {
+                path: path.to_path_buf(),
+                source,
+            })
+        };
+        let mut unit = Self::parse(&read(path)?, path.to_path_buf())?;
+
+        let mut drop_in_dir = path.as_os_str().to_owned();
+        drop_in_dir.push(".d");
+        let mut drop_ins: Vec<PathBuf> = match std::fs::read_dir(&drop_in_dir) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "conf"))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        drop_ins.sort();
+        for drop_in in drop_ins {
+            unit.merge_drop_in(&read(&drop_in)?, drop_in);
+        }
+        Ok(unit)
+    }
+
     pub fn parse(input: &str, source_path: PathBuf) -> Result<Self, ParseError> {
         let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
         let mut parse_warnings: Vec<String> = Vec::new();

@@ -47,10 +47,10 @@ fn remove_unit(name: &str, output_dir: &Path) {
     }
 }
 
-/// One `.service` path from pacman's target list that sd2dinit acts on.
+/// One unit from pacman's target list that is known to convert.
 #[derive(Debug)]
 struct Target {
-    full_path: PathBuf,
+    unit: SystemdUnit,
     name: String,
     user: bool,
 }
@@ -73,6 +73,11 @@ pub fn run_hook(config: &Config) -> anyhow::Result<()> {
 /// before anything is converted, so a unit may depend on another unit from the
 /// same transaction even though its dinit service does not exist yet.
 pub fn process_targets(lines: &[String], config: &Config) {
+    // The converter derives env-file and script paths from output_dir
+    let user_config = Config {
+        output_dir: config.user_output_dir.clone(),
+        ..config.clone()
+    };
     let mut removed = 0u32;
     let mut skipped = 0u32;
     let mut targets = Vec::new();
@@ -112,11 +117,22 @@ pub fn process_targets(lines: &[String], config: &Config) {
         let user = is_user_unit(&path);
 
         if full_path.exists() {
-            targets.push(Target {
-                full_path,
-                name,
-                user,
-            });
+            // Conversion fails only on the unit itself, never on what it depends on,
+            // so units that fail here are not offered to their siblings as dependencies.
+            let checked = SystemdUnit::load(&full_path)
+                .map_err(anyhow::Error::from)
+                .and_then(|unit| {
+                    let config = if user { &user_config } else { config };
+                    converter::convert(&unit, config, &KnownServices::new())?;
+                    Ok(unit)
+                });
+            match checked {
+                Ok(unit) => targets.push(Target { unit, name, user }),
+                Err(e) => {
+                    eprintln!("  error converting {}: {:#}", full_path.display(), e);
+                    skipped += 1;
+                }
+            }
             continue;
         }
 
@@ -148,18 +164,22 @@ pub fn process_targets(lines: &[String], config: &Config) {
 
     let mut converted = 0u32;
     for target in &targets {
-        let (output_dir, known, scope) = if target.user {
-            (&config.user_output_dir, &known_user, "user")
+        let (config, known, scope) = if target.user {
+            (&user_config, &known_user, "user")
         } else {
-            (&config.output_dir, &known_system, "system")
+            (config, &known_system, "system")
         };
-        match convert_unit(&target.full_path, output_dir, config, known) {
+        match convert_unit(&target.unit, config, known) {
             Ok(name) => {
                 eprintln!("  converted [{}]: {}", scope, name);
                 converted += 1;
             }
             Err(e) => {
-                eprintln!("  error converting {}: {:#}", target.full_path.display(), e);
+                eprintln!(
+                    "  error converting {}: {:#}",
+                    target.unit.source_path.display(),
+                    e
+                );
                 skipped += 1;
             }
         }
@@ -182,18 +202,12 @@ fn output_dir_for(config: &Config, user: bool) -> &Path {
 }
 
 fn convert_unit(
-    path: &Path,
-    output_dir: &Path,
+    unit: &SystemdUnit,
     config: &Config,
     known: &KnownServices,
 ) -> anyhow::Result<String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?;
-
-    let unit = SystemdUnit::parse(&content, path.to_path_buf())
-        .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
-
-    let result = converter::convert(&unit, config, known)
+    let output_dir = &config.output_dir;
+    let result = converter::convert(unit, config, known)
         .map_err(|e| anyhow::anyhow!("convert error: {}", e))?;
 
     // Print warnings

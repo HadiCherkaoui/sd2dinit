@@ -81,8 +81,6 @@ RestartSec=1
 WantedBy=multi-user.target
 ";
 
-// --- run-as ---
-
 #[test]
 fn run_as_names_only_the_user() {
     let output = generate(&convert_named(OLLAMA, "ollama", &artix()).main_service);
@@ -119,8 +117,6 @@ fn group_without_user_writes_no_run_as() {
             .any(|w| w.directive == "Group" && w.severity == Severity::Warn)
     );
 }
-
-// --- dependency resolution ---
 
 #[test]
 fn network_target_resolves_to_the_dinit_target_not_the_deprecated_service() {
@@ -192,8 +188,6 @@ fn a_unit_never_depends_on_itself() {
     assert!(result.main_service.after.is_empty());
 }
 
-// --- dependency kinds ---
-
 #[test]
 fn ollama_matches_systemd_semantics() {
     let output = generate(&convert_named(OLLAMA, "ollama", &artix()).main_service);
@@ -238,8 +232,6 @@ fn repeated_entries_collapse() {
     );
 }
 
-// --- restart ---
-
 #[test]
 fn restart_no_is_written_because_dinit_defaults_to_restarting() {
     let output = generate(&convert_unit("[Service]\nExecStart=/usr/bin/d\n").main_service);
@@ -272,8 +264,6 @@ fn unparseable_restart_sec_is_warned_about() {
     assert_eq!(result.main_service.restart_delay, None);
     assert!(result.warnings.iter().any(|w| w.directive == "RestartSec"));
 }
-
-// --- ExecStart= prefixes ---
 
 #[test]
 fn exec_prefixes_are_not_part_of_the_command() {
@@ -320,12 +310,94 @@ fn exec_type_is_a_plain_process() {
     assert!(!result.warnings.iter().any(|w| w.directive == "Type"));
 }
 
-// --- Environment= ---
-
 #[test]
 fn one_environment_line_can_hold_several_assignments() {
     let result =
         convert_unit("[Service]\nExecStart=/usr/bin/d\nEnvironment=\"A=1 2\" B=3 'C=x y'\n");
     let env = result.env_file_content.unwrap();
     assert_eq!(env, "A=1 2\nB=3\nC=x y\n");
+}
+
+#[test]
+fn before_wins_over_a_pull_in_of_the_same_service() {
+    // chronyd: Wants=time-sync.target + Before=time-sync.target. waits-for and
+    // before on one name is a cycle in dinit, and the ordering is what matters.
+    let result = convert_unit(
+        "[Unit]\nWants=network.target\nRequires=dbus.service\nBefore=network.target dbus.service\n[Service]\nExecStart=/usr/bin/d\n",
+    );
+    let svc = &result.main_service;
+    assert_eq!(
+        svc.before,
+        vec!["network.target".to_string(), "dbus".to_string()]
+    );
+    assert!(svc.waits_for.is_empty() && svc.depends_on.is_empty() && svc.after.is_empty());
+    assert!(result.warnings.iter().any(|w| w.directive == "Before"
+        && w.severity == Severity::Warn
+        && w.message.contains("network.target")));
+}
+
+#[test]
+fn numeric_user_warns_that_dinit_keeps_its_own_group() {
+    let result = convert_unit("[Service]\nExecStart=/usr/bin/d\nUser=1000\nGroup=1000\n");
+    assert_eq!(result.main_service.user.as_deref(), Some("1000"));
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.directive == "User" && w.severity == Severity::Warn)
+    );
+}
+
+#[test]
+fn colon_stop_command_in_a_stop_script_uses_shell_escaping() {
+    let result = convert_unit(
+        "[Service]\nExecStart=/usr/bin/d\nExecStop=:/bin/kill -TERM $MAINPID\nExecStopPost=/usr/bin/cleanup\n",
+    );
+    let script = result.stop_script.unwrap();
+    assert!(script.contains("/bin/kill -TERM \\$MAINPID\n"), "{script}");
+    assert!(!script.contains("$$"), "{script}");
+}
+
+#[test]
+fn dash_stop_command_may_fail_without_skipping_stop_post() {
+    let result = convert_unit(
+        "[Service]\nExecStart=/usr/bin/d\nExecStop=-/usr/bin/d stop\nExecStopPost=/usr/bin/cleanup\n",
+    );
+    let script = result.stop_script.unwrap();
+    assert!(script.contains("/usr/bin/d stop || true\n"), "{script}");
+}
+
+#[test]
+fn exec_start_that_is_only_a_prefix_is_an_error() {
+    for exec in ["@", "-", "+"] {
+        let unit = SystemdUnit::parse(
+            &format!("[Service]\nExecStart={exec}\n"),
+            PathBuf::from("/usr/lib/systemd/system/test.service"),
+        )
+        .unwrap();
+        assert!(
+            convert(&unit, &Config::default(), &artix()).is_err(),
+            "ExecStart={exec}"
+        );
+    }
+}
+
+#[test]
+fn restart_sec_understands_the_remaining_systemd_units() {
+    for (span, secs) in [
+        ("2d", 172_800.0),
+        ("1w", 604_800.0),
+        ("1500000ns", 0.0015),
+        ("250µs", 0.00025),
+        ("1h 1m", 3_660.0),
+    ] {
+        let result = convert_unit(&format!(
+            "[Service]\nExecStart=/usr/bin/d\nRestart=always\nRestartSec={span}\n"
+        ));
+        assert_eq!(
+            result.main_service.restart_delay,
+            Some(secs),
+            "RestartSec={span}"
+        );
+    }
 }

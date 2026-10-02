@@ -88,6 +88,9 @@ pub fn convert(
     // conversion time and rewritten as a dinit-compatible env-file, so dinit
     // can read them directly without a shell wrapper.
     let (exec_prefix, exec_cmd) = clean_exec("ExecStart", exec_start, &mut warnings);
+    if exec_cmd.is_empty() {
+        return Err(ConvertError::NoExecStart { unit: name });
+    }
     if exec_prefix.ignore_failure {
         warnings.push(Warning {
             directive: "ExecStart".into(),
@@ -98,25 +101,27 @@ pub fn convert(
     let command = {
         let cmd = replace_specifiers(&exec_cmd, &name, &mut warnings);
         if exec_prefix.no_env_expansion {
-            escape_dollars(&cmd, Quoting::Dinit)
+            exec_prefix.quote(&cmd, Quoting::Dinit)
         } else {
             convert_env_refs(cmd)
         }
     };
 
     // Stop command
-    let stop_command = unit.get("Service", "ExecStop").map(|raw| {
-        let (prefix, cmd) = clean_exec("ExecStop", raw, &mut warnings);
-        if prefix.no_env_expansion {
-            escape_dollars(&cmd, Quoting::Dinit)
-        } else {
-            cmd
-        }
-    });
+    let stop_command = unit
+        .get("Service", "ExecStop")
+        .map(|raw| clean_exec("ExecStop", raw, &mut warnings));
 
     // User and Group
     let user = unit.get("Service", "User").map(|s| s.to_string());
     match (user.as_deref(), unit.get("Service", "Group")) {
+        (Some(user), _) if user.bytes().all(|b| b.is_ascii_digit()) => warnings.push(Warning {
+            directive: "User".into(),
+            message: format!(
+                "User={user} is numeric — dinit then keeps its own group (root) and drops supplementary groups; use a user name"
+            ),
+            severity: Severity::Warn,
+        }),
         (Some(user), Some(group)) if group != user => warnings.push(Warning {
             directive: "Group".into(),
             message: format!(
@@ -577,11 +582,7 @@ fn convert_dependencies(
     known: &KnownServices,
     warnings: &mut Vec<Warning>,
 ) -> Dependencies {
-    let mut deps = Dependencies::default();
-    // Names already placed as depends-on, waits-for or after. The first two
-    // order startup themselves, so a weaker relation on the same name adds nothing.
-    let mut ordered: HashSet<String> = HashSet::new();
-
+    let mut resolved: Vec<(&str, Relation, &str, String)> = Vec::new();
     for (directive, relation) in DEPENDENCY_DIRECTIVES {
         for dep in unit
             .get_all("Unit", directive)
@@ -607,21 +608,45 @@ fn convert_dependencies(
                 });
                 continue;
             }
-            let list = match relation {
-                Relation::DependsOn => &mut deps.depends_on,
-                Relation::WaitsFor => &mut deps.waits_for,
-                Relation::After => &mut deps.after,
-                Relation::Before => &mut deps.before,
-            };
-            let first_placement = if relation == Relation::Before {
-                !ordered.contains(&name) && !list.contains(&name)
-            } else {
-                ordered.insert(name.clone())
-            };
-            if first_placement {
-                list.push(name);
-            }
+            resolved.push((directive, relation, dep, name));
         }
+    }
+
+    // dinit rejects `before` plus a pull-in of the same service as a cycle;
+    // the ordering is kept because it is what Before= promised.
+    let before: HashSet<&str> = resolved
+        .iter()
+        .filter(|(_, relation, _, _)| *relation == Relation::Before)
+        .map(|(_, _, _, name)| name.as_str())
+        .collect();
+
+    let mut deps = Dependencies::default();
+    let mut placed: HashSet<&str> = HashSet::new();
+    let mut warned: HashSet<&str> = HashSet::new();
+    for (_, relation, dep, name) in &resolved {
+        if *relation != Relation::Before && before.contains(name.as_str()) {
+            if *relation != Relation::After && warned.insert(name) {
+                warnings.push(Warning {
+                    directive: "Before".into(),
+                    message: format!(
+                        "{dep} is also in Before= — kept as before, so it is no longer started along with this service"
+                    ),
+                    severity: Severity::Warn,
+                });
+            }
+            continue;
+        }
+        // The first placement is the strongest, as DEPENDENCY_DIRECTIVES is ordered.
+        if !placed.insert(name) {
+            continue;
+        }
+        let list = match relation {
+            Relation::DependsOn => &mut deps.depends_on,
+            Relation::WaitsFor => &mut deps.waits_for,
+            Relation::After => &mut deps.after,
+            Relation::Before => &mut deps.before,
+        };
+        list.push(name.clone());
     }
 
     if !unit.get_all("Unit", "Conflicts").is_empty() {
@@ -678,10 +703,24 @@ enum Quoting {
     Shell,
 }
 
-fn escape_dollars(cmd: &str, quoting: Quoting) -> String {
-    match quoting {
-        Quoting::Dinit => cmd.replace('$', "$$"),
-        Quoting::Shell => cmd.replace('$', "\\$"),
+impl ExecPrefix {
+    /// Writes `cmd` for `quoting`, escaping `$` when the `:` prefix was given.
+    fn quote(self, cmd: &str, quoting: Quoting) -> String {
+        match (self.no_env_expansion, quoting) {
+            (false, _) => cmd.to_owned(),
+            (true, Quoting::Dinit) => cmd.replace('$', "$$"),
+            (true, Quoting::Shell) => cmd.replace('$', "\\$"),
+        }
+    }
+
+    /// Formats `cmd` as a line of a generated `/bin/sh` script running under `set -e`.
+    fn script_line(self, cmd: &str) -> String {
+        let cmd = self.quote(cmd, Quoting::Shell);
+        if self.ignore_failure {
+            format!("{cmd} || true\n")
+        } else {
+            format!("{cmd}\n")
+        }
     }
 }
 
@@ -736,22 +775,6 @@ fn clean_exec(directive: &str, raw: &str, warnings: &mut Vec<Warning>) -> (ExecP
     (prefix, command)
 }
 
-/// Cleans an `Exec*=` value and applies the `:` prefix for `quoting`.
-fn exec_command(
-    directive: &str,
-    raw: &str,
-    quoting: Quoting,
-    warnings: &mut Vec<Warning>,
-) -> (bool, String) {
-    let (prefix, cmd) = clean_exec(directive, raw, warnings);
-    let cmd = if prefix.no_env_expansion {
-        escape_dollars(&cmd, quoting)
-    } else {
-        cmd
-    };
-    (prefix.ignore_failure, cmd)
-}
-
 /// Parses a systemd time span such as `3`, `500ms` or `1min 30s` into seconds.
 ///
 /// A bare number is seconds, as in systemd. Returns `None` for anything else,
@@ -769,15 +792,21 @@ fn parse_timespan_secs(span: &str) -> Option<f64> {
         let value: f64 = rest[..num_len].parse().ok()?;
         rest = rest[num_len..].trim_start();
         let unit_len = rest
-            .find(|c: char| !c.is_ascii_alphabetic())
+            .find(|c: char| !c.is_alphabetic())
             .unwrap_or(rest.len());
         // Sub-second units divide rather than multiply so 500ms is exactly 0.5.
         let (mul, div) = match &rest[..unit_len] {
             "" | "s" | "sec" | "second" | "seconds" => (1.0, 1.0),
             "ms" | "msec" => (1.0, 1_000.0),
-            "us" | "usec" => (1.0, 1_000_000.0),
+            "us" | "usec" | "\u{b5}s" | "\u{3bc}s" => (1.0, 1_000_000.0),
+            "ns" | "nsec" => (1.0, 1_000_000_000.0),
             "m" | "min" | "minute" | "minutes" => (60.0, 1.0),
             "h" | "hr" | "hour" | "hours" => (3_600.0, 1.0),
+            "d" | "day" | "days" => (86_400.0, 1.0),
+            "w" | "week" | "weeks" => (604_800.0, 1.0),
+            // systemd's month and year are 30.44 and 365.25 days
+            "M" | "month" | "months" => (2_629_800.0, 1.0),
+            "y" | "year" | "years" => (31_557_600.0, 1.0),
             _ => return None,
         };
         total += value * mul / div;
@@ -885,28 +914,33 @@ fn convert_exec_post(
 
 fn convert_stop_post(
     unit: &SystemdUnit,
-    stop_command: Option<String>,
+    stop_command: Option<(ExecPrefix, String)>,
     service_name: &str,
     config: &Config,
     warnings: &mut Vec<Warning>,
 ) -> (Option<String>, Option<String>) {
     let stop_post_cmds = unit.get_all("Service", "ExecStopPost");
     if stop_post_cmds.is_empty() {
-        return (stop_command, None);
+        let command = stop_command.map(|(prefix, cmd)| {
+            if prefix.ignore_failure {
+                warnings.push(Warning {
+                    directive: "ExecStop".into(),
+                    message: "'-' prefix dropped — dinit reports a failing stop command".into(),
+                    severity: Severity::Info,
+                });
+            }
+            prefix.quote(&cmd, Quoting::Dinit)
+        });
+        return (command, None);
     }
 
     match stop_command {
-        Some(stop_cmd) => {
+        Some((stop_prefix, stop_cmd)) => {
             let mut script = String::from("#!/bin/sh\nset -e\n");
-            script.push_str(&format!("{}\n", stop_cmd));
+            script.push_str(&stop_prefix.script_line(&stop_cmd));
             for raw in &stop_post_cmds {
-                let (ignore_failure, cmd) =
-                    exec_command("ExecStopPost", raw, Quoting::Shell, warnings);
-                if ignore_failure {
-                    script.push_str(&format!("{} || true\n", cmd));
-                } else {
-                    script.push_str(&format!("{}\n", cmd));
-                }
+                let (prefix, cmd) = clean_exec("ExecStopPost", raw, warnings);
+                script.push_str(&prefix.script_line(&cmd));
             }
             let wrapper_cmd = build_script_command(config, service_name, "stop");
             (Some(wrapper_cmd), Some(script))
@@ -1071,26 +1105,12 @@ fn exec_hook_command(
     if let [(prefix, cmd)] = cleaned.as_slice()
         && !prefix.ignore_failure
     {
-        let cmd = if prefix.no_env_expansion {
-            escape_dollars(cmd, Quoting::Dinit)
-        } else {
-            cmd.clone()
-        };
-        return (cmd, None);
+        return (prefix.quote(cmd, Quoting::Dinit), None);
     }
 
     let mut script = String::from("#!/bin/sh\nset -e\n");
     for (prefix, cmd) in &cleaned {
-        let cmd = if prefix.no_env_expansion {
-            escape_dollars(cmd, Quoting::Shell)
-        } else {
-            cmd.clone()
-        };
-        if prefix.ignore_failure {
-            script.push_str(&format!("{} || true\n", cmd));
-        } else {
-            script.push_str(&format!("{}\n", cmd));
-        }
+        script.push_str(&prefix.script_line(cmd));
     }
     (
         build_script_command(config, service_name, suffix),

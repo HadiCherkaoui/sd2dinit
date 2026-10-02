@@ -126,16 +126,19 @@ fn main() {
 }
 
 fn run_convert(
-    unit_file: &PathBuf,
+    unit_file: &Path,
     output_dir: Option<&Path>,
     dry_run: bool,
     force: bool,
 ) -> Result<i32> {
     let mut config = Config::load().context("failed to load config")?;
 
-    // CLI --output-dir overrides config (so converter uses correct script paths)
+    // The converter writes script paths relative to output_dir, so it must be final here
+    let user = is_user_unit(unit_file);
     if let Some(dir) = output_dir {
         config.output_dir = dir.to_path_buf();
+    } else if user {
+        config.output_dir = config.user_output_dir.clone();
     }
 
     // Reject non-.service files (including extension-less files)
@@ -172,39 +175,13 @@ fn run_convert(
         return Ok(1);
     }
 
-    let content = fs::read_to_string(unit_file)
-        .with_context(|| format!("failed to read {}", unit_file.display()))?;
+    let unit = SystemdUnit::load(unit_file)
+        .with_context(|| format!("failed to load {}", unit_file.display()))?;
 
-    let mut unit = SystemdUnit::parse(&content, unit_file.clone())
-        .with_context(|| format!("failed to parse {}", unit_file.display()))?;
-
-    // Apply drop-in overrides from <unit>.d/*.conf
-    let drop_in_dir = {
-        let mut p = unit_file.to_path_buf();
-        let name = unit_file
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        p.set_file_name(format!("{}.d", name));
-        p
-    };
-    if drop_in_dir.is_dir() {
-        let mut entries: Vec<_> = fs::read_dir(&drop_in_dir)
-            .with_context(|| format!("failed to read drop-in dir {}", drop_in_dir.display()))?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|x| x == "conf").unwrap_or(false))
-            .collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let drop_content = fs::read_to_string(entry.path())
-                .with_context(|| format!("failed to read drop-in {}", entry.path().display()))?;
-            unit.merge_drop_in(&drop_content, entry.path());
-        }
-    }
-
-    let mut service_dirs = if is_user_unit(unit_file) {
-        config.user_service_dirs.clone()
+    let mut service_dirs = if user {
+        let mut dirs = config.user_service_dirs.clone();
+        dirs.extend(own_user_service_dirs());
+        dirs
     } else {
         config.service_dirs.clone()
     };
@@ -309,8 +286,20 @@ fn run_convert(
     Ok(if had_warnings { 1 } else { 0 })
 }
 
+/// The calling user's own dinit service directories, as a user dinit instance searches them.
+fn own_user_service_dirs() -> Vec<PathBuf> {
+    let var = |name| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let mut dirs: Vec<PathBuf> = var("XDG_CONFIG_HOME").into_iter().collect();
+    dirs.extend(var("HOME").map(|home| home.join(".config")));
+    dirs.into_iter().map(|dir| dir.join("dinit.d")).collect()
+}
+
 fn run_install(
-    unit_file: &PathBuf,
+    unit_file: &Path,
     output_dir: Option<&Path>,
     enable: bool,
     start: bool,
