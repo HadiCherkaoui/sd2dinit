@@ -124,3 +124,41 @@ fn own_user_units_default_to_own_dinit_dir() {
     });
     assert!(written.contains("waits-for = pipewire\n"), "{written}");
 }
+
+#[test]
+fn another_users_unit_needs_an_output_dir() {
+    let scratch = Scratch::new("other-user");
+    let unit = scratch.unit("otherhome/.config/systemd/user", "theirs");
+    let output = scratch.sd2dinit(&unit, &["--dry-run"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--output-dir"));
+}
+
+#[test]
+fn relative_output_dir_is_written_as_an_absolute_path() {
+    let scratch = Scratch::new("relative");
+    let unit = scratch.root.join("app.service");
+    fs::write(
+        &unit,
+        "[Service]\nEnvironment=A=1\nExecStart=/usr/bin/app\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_sd2dinit"))
+        .args(["convert", "--output-dir", "rel"])
+        .arg(&unit)
+        .current_dir(&scratch.root)
+        .env("HOME", scratch.root.join("home"))
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .unwrap();
+
+    let written = fs::read_to_string(scratch.root.join("rel/app")).unwrap_or_else(|e| {
+        panic!("{e}: {}", String::from_utf8_lossy(&output.stderr));
+    });
+    let env_file = scratch.root.join("rel/app.env");
+    assert!(
+        written.contains(&format!("env-file = {}\n", env_file.display())),
+        "{written}"
+    );
+}

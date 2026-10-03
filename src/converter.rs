@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::command::{ExecLine, dinit_literal};
+use crate::command::{ExecLine, MainpidKill, dinit_literal, signal_name};
 use crate::config::Config;
 use crate::error::ConvertError;
 use crate::model::{ConversionResult, DinitService, DinitType, RestartPolicy, Severity, Warning};
@@ -79,13 +79,23 @@ pub fn convert(
         }
     };
 
+    let env = convert_environment(unit, config, &name, &mut warnings);
+    let ctx = ExecContext {
+        service_name: &name,
+        env: env
+            .vars
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect(),
+    };
+
     let mut starts: Vec<ExecLine> = unit
         .get_all("Service", "ExecStart")
         .into_iter()
-        .filter_map(|raw| clean_exec("ExecStart", raw, &name, &mut warnings))
+        .flat_map(|raw| clean_exec(&ctx, "ExecStart", raw, &mut warnings))
         .collect();
     if starts.is_empty() {
-        return Err(ConvertError::NoExecStart { unit: name });
+        return Err(ConvertError::NoExecStart { unit: name.clone() });
     }
     if starts.len() > 1 && service_type != DinitType::Scripted {
         warnings.push(Warning {
@@ -169,18 +179,14 @@ pub fn convert(
         secs
     });
 
-    // Environment — parse shell-format EnvironmentFile entries and rewrite them
-    // as a dinit-compatible combined env-file.
-    let (env_files, env_file_content) = convert_environment(unit, config, &name, &mut warnings);
-
     // Dependencies
     let deps = convert_dependencies(unit, &name, config, known, &mut warnings);
 
     let (pre_service, pre_script) =
-        match exec_hook(unit, "ExecStartPre", &name, "pre", config, &mut warnings) {
+        match exec_hook(unit, &ctx, "ExecStartPre", "pre", config, &mut warnings) {
             Some((command, script)) => {
                 // systemd orders ExecStartPre= after the unit's dependencies too
-                let mut pre = hook_service(unit, format!("{name}-pre"), command, &env_files);
+                let mut pre = hook_service(unit, format!("{name}-pre"), command, &env.files);
                 pre.depends_on = deps.depends_on.clone();
                 pre.waits_for = deps.waits_for.clone();
                 pre.after = deps.after.clone();
@@ -190,8 +196,8 @@ pub fn convert(
         };
     let (post_service, post_script) = match exec_hook(
         unit,
+        &ctx,
         "ExecStartPost",
-        &name,
         "post",
         config,
         &mut warnings,
@@ -204,14 +210,17 @@ pub fn convert(
                 ),
                 severity: Severity::Warn,
             });
-            let mut post = hook_service(unit, format!("{name}-post"), command, &env_files);
+            let mut post = hook_service(unit, format!("{name}-post"), command, &env.files);
             post.waits_for = vec![name.clone()];
             (Some(post), script)
         }
         None => (None, None),
     };
 
-    let stop = convert_stop(unit, &service_type, &name, config, &mut warnings);
+    let stop = convert_stop(unit, &ctx, &service_type, config, &mut warnings);
+    let term_signal = stop
+        .term_signal
+        .or_else(|| kill_signal(unit, &service_type, &mut warnings));
 
     // WantedBy / RequiredBy in [Install]
     let should_enable =
@@ -240,10 +249,10 @@ pub fn convert(
         service_type,
         command: Some(command),
         stop_command: stop.command,
-        term_signal: stop.term_signal.map(str::to_owned),
+        term_signal: term_signal.map(str::to_owned),
         user,
         working_dir,
-        env_files,
+        env_files: env.files,
         pid_file,
         restart,
         smooth_recovery,
@@ -263,23 +272,19 @@ pub fn convert(
         post_script,
         start_script,
         stop_script: stop.script,
-        env_file_content,
+        env_file_content: env.content,
         warnings,
         should_enable,
     })
 }
 
-/// Expands the unit specifiers dinit has an equivalent for and drops the rest.
+/// Expands the unit specifiers dinit has an equivalent for.
 ///
 /// Templates are never converted, so `%n`, `%N` and `%p` are fully known.
-fn replace_specifiers(
-    directive: &str,
-    input: &str,
-    service_name: &str,
-    warnings: &mut Vec<Warning>,
-) -> String {
+/// Other letters and digits are dropped and collected in `unknown`; a `%`
+/// before anything else is kept, as systemd keeps it.
+fn replace_specifiers(input: &str, service_name: &str, unknown: &mut BTreeSet<char>) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut warned = HashSet::new();
     let mut chars = input.chars();
     while let Some(c) = chars.next() {
         if c != '%' {
@@ -293,14 +298,12 @@ fn replace_specifiers(
                 result.push_str(".service");
             }
             Some('N' | 'p') => result.push_str(service_name),
+            Some(other) if other.is_ascii_alphanumeric() => {
+                unknown.insert(other);
+            }
             Some(other) => {
-                if warned.insert(other) {
-                    warnings.push(Warning {
-                        directive: directive.into(),
-                        message: format!("unknown specifier %{other} removed"),
-                        severity: Severity::Warn,
-                    });
-                }
+                result.push('%');
+                result.push(other);
             }
             None => result.push('%'),
         }
@@ -342,12 +345,19 @@ fn convert_restart(
     }
 }
 
+/// The unit's environment, rewritten as one dinit env-file.
+struct Environment {
+    files: Vec<PathBuf>,
+    content: Option<String>,
+    vars: Vec<(String, String)>,
+}
+
 fn convert_environment(
     unit: &SystemdUnit,
     config: &Config,
     service_name: &str,
     warnings: &mut Vec<Warning>,
-) -> (Vec<PathBuf>, Option<String>) {
+) -> Environment {
     let mut vars: Vec<(String, String)> = Vec::new();
 
     // Inline Environment= directives
@@ -392,7 +402,11 @@ fn convert_environment(
     }
 
     if vars.is_empty() {
-        return (Vec::new(), None);
+        return Environment {
+            files: Vec::new(),
+            content: None,
+            vars,
+        };
     }
 
     let env_path = config.output_dir.join(format!("{}.env", service_name));
@@ -400,7 +414,11 @@ fn convert_environment(
         .iter()
         .map(|(k, v)| format!("{}={}\n", k, dinit_quote_value(v)))
         .collect::<String>();
-    (vec![env_path], Some(content))
+    Environment {
+        files: vec![env_path],
+        content: Some(content),
+        vars,
+    }
 }
 
 /// Splits an `Environment=` value into its assignments.
@@ -705,22 +723,58 @@ fn strip_unit_suffix(dep: &str) -> &str {
         .unwrap_or(dep)
 }
 
-/// Parses one `Exec*=` value after expanding its specifiers.
+/// What every `Exec*=` line of one unit is converted against.
+struct ExecContext<'a> {
+    service_name: &'a str,
+    /// The unit's environment, as far as it is known when converting.
+    env: HashMap<&'a str, &'a str>,
+}
+
+/// Parses one `Exec*=` value into its commands, expanding specifiers in each word.
 ///
 /// `$MAINPID` is reported here for every directive but `ExecStop=`, which
 /// [`convert_stop`] handles itself.
 fn clean_exec(
+    ctx: &ExecContext<'_>,
     directive: &str,
     raw: &str,
-    service_name: &str,
     warnings: &mut Vec<Warning>,
-) -> Option<ExecLine> {
-    let raw = replace_specifiers(directive, raw, service_name, warnings);
-    let line = ExecLine::parse(directive, &raw, warnings)?;
-    if directive != "ExecStop" && line.uses_mainpid() {
-        warn_mainpid(directive, warnings);
+) -> Vec<ExecLine> {
+    let mut unknown = BTreeSet::new();
+    let lines = ExecLine::parse(
+        directive,
+        raw,
+        &mut |word| replace_specifiers(word, ctx.service_name, &mut unknown),
+        warnings,
+    );
+    for specifier in unknown {
+        warnings.push(Warning {
+            directive: directive.into(),
+            message: format!("unknown specifier %{specifier} removed"),
+            severity: Severity::Warn,
+        });
     }
-    Some(line)
+    for line in &lines {
+        if directive != "ExecStop" && line.uses_mainpid() {
+            warn_mainpid(directive, warnings);
+        }
+        for name in line.split_vars() {
+            if ctx
+                .env
+                .get(name)
+                .is_some_and(|value| value.contains(['\'', '"', '\\']))
+            {
+                warnings.push(Warning {
+                    directive: directive.into(),
+                    message: format!(
+                        "${name} is split at whitespace only — dinit ignores the quotes and backslashes in its value, which systemd honours"
+                    ),
+                    severity: Severity::Warn,
+                });
+            }
+        }
+    }
+    lines
 }
 
 fn warn_mainpid(directive: &str, warnings: &mut Vec<Warning>) {
@@ -797,8 +851,8 @@ fn sequential_script(lines: &[ExecLine]) -> String {
 /// directive has no usable lines.
 fn exec_hook(
     unit: &SystemdUnit,
+    ctx: &ExecContext<'_>,
     directive: &str,
-    service_name: &str,
     suffix: &str,
     config: &Config,
     warnings: &mut Vec<Warning>,
@@ -806,13 +860,13 @@ fn exec_hook(
     let lines: Vec<ExecLine> = unit
         .get_all("Service", directive)
         .into_iter()
-        .filter_map(|raw| clean_exec(directive, raw, service_name, warnings))
+        .flat_map(|raw| clean_exec(ctx, directive, raw, warnings))
         .collect();
     match lines.as_slice() {
         [] => None,
         [line] if !line.prefix.ignore_failure => Some((line.to_dinit(directive, warnings), None)),
         _ => Some((
-            build_script_command(config, service_name, suffix),
+            build_script_command(config, ctx.service_name, suffix),
             Some(sequential_script(&lines)),
         )),
     }
@@ -860,48 +914,61 @@ struct Stop {
 /// `kill $MAINPID` is replaced by dinit's own `term-signal`.
 fn convert_stop(
     unit: &SystemdUnit,
+    ctx: &ExecContext<'_>,
     service_type: &DinitType,
-    service_name: &str,
     config: &Config,
     warnings: &mut Vec<Warning>,
 ) -> Stop {
     let mut stops: Vec<ExecLine> = unit
         .get_all("Service", "ExecStop")
         .into_iter()
-        .filter_map(|raw| clean_exec("ExecStop", raw, service_name, warnings))
+        .flat_map(|raw| clean_exec(ctx, "ExecStop", raw, warnings))
         .collect();
     let mut stop = Stop::default();
-    if let [line] = stops.as_slice()
-        && let Some(signal) = line.mainpid_kill_signal()
-    {
-        warnings.push(Warning {
+    let kill = match stops.as_slice() {
+        [line] => line.mainpid_kill().map(|kill| (kill, line.to_shell())),
+        _ => None,
+    };
+    match &kill {
+        Some((MainpidKill::Stop(signal), _)) => {
+            warnings.push(Warning {
+                directive: "ExecStop".into(),
+                message: format!("kill $MAINPID dropped — dinit sends SIG{signal} to the process itself"),
+                severity: Severity::Info,
+            });
+            if *signal != "TERM" && *service_type != DinitType::Scripted {
+                stop.term_signal = Some(signal);
+            }
+        }
+        Some((MainpidKill::Other, line)) => warnings.push(Warning {
             directive: "ExecStop".into(),
             message: format!(
-                "kill $MAINPID dropped — dinit sends SIG{signal} to the process itself"
+                "{line} dropped — dinit has no $MAINPID and stops the process with its term-signal instead"
             ),
-            severity: Severity::Info,
-        });
-        if signal != "TERM" && *service_type != DinitType::Scripted {
-            stop.term_signal = Some(signal);
-        }
+            severity: Severity::Warn,
+        }),
+        None if stops.iter().any(ExecLine::uses_mainpid) => warn_mainpid("ExecStop", warnings),
+        None => {}
+    }
+    if kill.is_some() {
         stops.clear();
-    } else if stops.iter().any(ExecLine::uses_mainpid) {
-        warn_mainpid("ExecStop", warnings);
     }
 
     let posts: Vec<ExecLine> = unit
         .get_all("Service", "ExecStopPost")
         .into_iter()
-        .filter_map(|raw| clean_exec("ExecStopPost", raw, service_name, warnings))
+        .flat_map(|raw| clean_exec(ctx, "ExecStopPost", raw, warnings))
         .collect();
 
     match (stops.as_slice(), posts.is_empty()) {
         ([], true) => {}
         ([], false) => warnings.push(Warning {
             directive: "ExecStopPost".into(),
-            message:
-                "ExecStopPost= without ExecStop= skipped — dinit handles stop signals natively"
-                    .into(),
+            message: if kill.is_some() {
+                "ExecStopPost= skipped — ExecStop= became dinit's own stop signal, after which dinit runs no command".into()
+            } else {
+                "ExecStopPost= without ExecStop= skipped — dinit handles stop signals natively".into()
+            },
             severity: Severity::Warn,
         }),
         ([line], true) => {
@@ -933,11 +1000,37 @@ fn convert_stop(
                 }
             }
             script.push_str("exit \"$rc\"\n");
-            stop.command = Some(build_script_command(config, service_name, "stop"));
+            stop.command = Some(build_script_command(config, ctx.service_name, "stop"));
             stop.script = Some(script);
         }
     }
     stop
+}
+
+/// Maps `KillSignal=`, the signal systemd stops the service with, to dinit's `term-signal`.
+fn kill_signal(
+    unit: &SystemdUnit,
+    service_type: &DinitType,
+    warnings: &mut Vec<Warning>,
+) -> Option<&'static str> {
+    let raw = unit.get("Service", "KillSignal")?;
+    if *service_type == DinitType::Scripted {
+        return None;
+    }
+    match signal_name(raw) {
+        Some("TERM") => None,
+        Some(signal) => Some(signal),
+        None => {
+            warnings.push(Warning {
+                directive: "KillSignal".into(),
+                message: format!(
+                    "KillSignal={raw} is not a signal dinit can send — SIGTERM is used"
+                ),
+                severity: Severity::Warn,
+            });
+            None
+        }
+    }
 }
 
 fn warn_out_of_scope(unit: &SystemdUnit, warnings: &mut Vec<Warning>) {

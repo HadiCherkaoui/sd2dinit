@@ -189,7 +189,8 @@ units) and the output directory, plus the units that convert in the same pacman
 transaction.
 
 `sd2dinit convert` writes a unit from `~/.config/systemd/user` to your own
-`~/.config/dinit.d`, and any other user unit to `user_output_dir`. Only when it
+`~/.config/dinit.d`, and any other user unit to `user_output_dir`; a unit from
+another user's home needs an explicit `--output-dir`. Only when it
 writes into your own directory does it also resolve against `$XDG_CONFIG_HOME/dinit.d`
 and `~/.config/dinit.d`; a service in the shared directory must not depend on
 something only you have. Each candidate is matched in this order:
@@ -284,14 +285,18 @@ sd2dinit splits each line into the same argv systemd would and quotes every word
 again for where it ends up: dinit only understands double quotes, and a
 generated `/bin/sh` script would otherwise expand `*`, `~` or `;`.
 
-- `'…'`, `"…"` and C escapes such as `\s` and `\x41` are unquoted as systemd does.
+- `'…'`, `"…"` and C escapes such as `\s` and `\x41` are unquoted as systemd
+  does, and a lone `;` separates several commands on one line.
 - `$VAR` standing alone splits into words (dinit's `$/VAR`), `${VAR}` is always
-  one word, `$$` is a literal `$`, and a bare `$VAR` inside a word stays literal,
-  all as in systemd.
+  one word, `$$` is a literal `$`, and a bare `$VAR` or `${VAR:-default}` inside
+  a word stays literal, all as in systemd. dinit splits `$/VAR` at whitespace
+  only, so quotes inside such a value are reported.
 - `%n`, `%N`, `%p` and `%%` are expanded; other specifiers are dropped with a warning.
-- dinit never sets `$MAINPID`. A lone `ExecStop=kill [-SIG] $MAINPID` is dropped
-  and its signal becomes `term-signal`, since dinit signals the process itself
-  when no stop command is set; any other use of `$MAINPID` is warned about.
+- dinit never sets `$MAINPID`. A lone `ExecStop=kill $MAINPID` is dropped, since
+  dinit signals the process itself when no stop command is set: `-INT`, `-QUIT`
+  and `-KILL` become `term-signal`, and signals that do not stop the process are
+  reported. Any other use of `$MAINPID` is warned about.
+- `KillSignal=` becomes `term-signal`.
 - `ExecStopPost=` runs even when `ExecStop=` fails, and the stop script then
   exits with `ExecStop=`'s status.
 

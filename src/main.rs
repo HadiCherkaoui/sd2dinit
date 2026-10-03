@@ -157,9 +157,11 @@ fn run_convert(
     if let Some(dir) = output_dir {
         config.output_dir = dir.to_path_buf();
     } else if user {
-        config.output_dir =
-            own_unit_output_dir(unit_file).unwrap_or_else(|| config.user_output_dir.clone());
+        config.output_dir = default_user_output_dir(unit_file, &config)?;
     }
+    // dinit resolves relative paths against the service file's directory, not ours
+    config.output_dir = std::path::absolute(&config.output_dir)
+        .context("failed to resolve the output directory")?;
 
     // Reject non-.service files (including extension-less files)
     match unit_file.extension().and_then(|e| e.to_str()) {
@@ -325,13 +327,36 @@ fn run_convert(
     })
 }
 
-/// `~/.config/dinit.d` for a unit from the caller's own `~/.config/systemd/user`.
-fn own_unit_output_dir(unit_file: &Path) -> Option<PathBuf> {
-    let config_home = config_home()?;
-    let unit_file = std::path::absolute(unit_file).ok()?;
-    unit_file
-        .starts_with(config_home.join("systemd/user"))
-        .then(|| config_home.join("dinit.d"))
+/// Where a user unit goes when no `--output-dir` is given.
+///
+/// A unit from the caller's own `~/.config/systemd/user` goes to their own
+/// `~/.config/dinit.d`; any other goes to the shared `user_output_dir`.
+///
+/// # Errors
+///
+/// Fails for a unit from another user's `~/.config/systemd/user`, which must
+/// not land where every user's dinit loads it.
+fn default_user_output_dir(unit_file: &Path, config: &Config) -> Result<PathBuf> {
+    // Canonical on both sides, so a symlinked ~/.config still matches
+    let canonical = |path: &Path| fs::canonicalize(path).or_else(|_| std::path::absolute(path));
+    let unit = canonical(unit_file)
+        .with_context(|| format!("failed to resolve {}", unit_file.display()))?;
+    if let Some(home) = config_home()
+        && canonical(&home).is_ok_and(|real| unit.starts_with(real.join("systemd/user")))
+    {
+        return Ok(home.join("dinit.d"));
+    }
+    let names: Vec<_> = unit.iter().collect();
+    if names
+        .windows(3)
+        .any(|w| w[0] == ".config" && w[1] == "systemd" && w[2] == "user")
+    {
+        anyhow::bail!(
+            "{} is another user's unit — pass --output-dir to choose where it goes",
+            unit_file.display()
+        );
+    }
+    Ok(config.user_output_dir.clone())
 }
 
 /// The calling user's own dinit service directories, as a user dinit instance searches them.
